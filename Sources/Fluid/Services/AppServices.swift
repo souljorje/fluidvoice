@@ -19,8 +19,7 @@ import Foundation
 
 /// Centralized container for app-wide services.
 /// This exists to reduce ContentView's generic type signature complexity,
-/// which has been observed to cause EXC_BAD_ACCESS crashes during Swift
-/// runtime type metadata resolution at app launch.
+/// which has been observed to cause EXC_BAD_ACCESS crashes at app launch.
 @MainActor
 final class AppServices: ObservableObject {
     /// Shared singleton instance
@@ -88,6 +87,18 @@ final class AppServices: ObservableObject {
         return service
     }
 
+    private var _callRecordingIndicator: CallRecordingIndicatorController?
+    var callRecordingIndicator: CallRecordingIndicatorController {
+        if let existing = self._callRecordingIndicator {
+            return existing
+        }
+        let controller = CallRecordingIndicatorController(
+            callTranscriptionService: self.callTranscription
+        )
+        self._callRecordingIndicator = controller
+        return controller
+    }
+
     private var cancellables = Set<AnyCancellable>()
 
     private init() {
@@ -134,6 +145,7 @@ final class AppServices: ObservableObject {
         _ = self.audioObserver
         _ = self.asr
         _ = self.callTranscription
+        _ = self.callRecordingIndicator
 
         DebugLogger.shared.info("✅ All services initialized", source: "AppServices")
     }
@@ -142,6 +154,8 @@ final class AppServices: ObservableObject {
         if let callTranscription = self._callTranscription {
             await callTranscription.stopForTermination()
         }
+        self._callRecordingIndicator?.hide()
+        self._callRecordingIndicator = nil
         self._callTranscription = nil
 
         if let asr = self._asr {
