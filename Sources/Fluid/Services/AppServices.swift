@@ -78,6 +78,16 @@ final class AppServices: ObservableObject {
         return coordinator
     }
 
+    private var _callTranscription: CallTranscriptionService?
+    var callTranscription: CallTranscriptionService {
+        if let existing = self._callTranscription {
+            return existing
+        }
+        let service = CallTranscriptionService(asrService: self.asr)
+        self._callTranscription = service
+        return service
+    }
+
     private var cancellables = Set<AnyCancellable>()
 
     private init() {
@@ -123,11 +133,17 @@ final class AppServices: ObservableObject {
         // Access the properties to trigger lazy initialization
         _ = self.audioObserver
         _ = self.asr
+        _ = self.callTranscription
 
         DebugLogger.shared.info("✅ All services initialized", source: "AppServices")
     }
 
     func shutdownForTermination() async {
+        if let callTranscription = self._callTranscription {
+            await callTranscription.stopForTermination()
+        }
+        self._callTranscription = nil
+
         if let asr = self._asr {
             await asr.shutdownForTermination()
             self._asr = nil

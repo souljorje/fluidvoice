@@ -319,6 +319,26 @@ nonisolated struct TranscriptionResult: Identifiable, Sendable, Codable {
     }
 }
 
+struct FileTranscriptionOptions: Sendable, Equatable {
+    let speakerLabelsEnabled: Bool
+    let expectedSpeakerCount: Int?
+
+    @MainActor
+    static var userSettings: Self {
+        let settings = SettingsStore.shared
+        let expectedSpeakerCount = settings.fileTranscriptionExpectedSpeakerCount
+        return Self(
+            speakerLabelsEnabled: settings.fileTranscriptionSpeakerLabelsEnabled,
+            expectedSpeakerCount: expectedSpeakerCount > 0 ? expectedSpeakerCount : nil
+        )
+    }
+
+    static let call = Self(
+        speakerLabelsEnabled: true,
+        expectedSpeakerCount: nil
+    )
+}
+
 /// Service for transcribing complete audio/video files with optional speaker diarization
 /// NOTE: This service shares the ASR models with ASRService to avoid duplicate memory usage
 @MainActor
@@ -399,10 +419,13 @@ final class MeetingTranscriptionService: ObservableObject {
         }
     }
 
-    /// Transcribe an audio or video file
-    /// - Parameters:
-    ///   - fileURL: URL to the audio/video file
-    func transcribeFile(_ fileURL: URL) async throws -> TranscriptionResult {
+    /// Transcribe an audio or video file.
+    /// Passing no options preserves the existing user-configured file-transcription behavior.
+    func transcribeFile(
+        _ fileURL: URL,
+        options requestedOptions: FileTranscriptionOptions? = nil
+    ) async throws -> TranscriptionResult {
+        let options = requestedOptions ?? .userSettings
         self.isTranscribing = true
         error = nil
         self.fallbackNotice = nil
@@ -459,7 +482,7 @@ final class MeetingTranscriptionService: ObservableObject {
 
             // Speaker-labeled path: diarize first, then transcribe each speaker turn.
             // Any diarization failure falls back to the standard paths below.
-            if SettingsStore.shared.fileTranscriptionSpeakerLabelsEnabled,
+            if options.speakerLabelsEnabled,
                SpeakerDiarizationService.isSupported,
                !isVideoContainer
             {
@@ -467,7 +490,8 @@ final class MeetingTranscriptionService: ObservableObject {
                     fileURL,
                     provider: provider,
                     duration: duration,
-                    startTime: startTime
+                    startTime: startTime,
+                    expectedSpeakerCount: options.expectedSpeakerCount
                 ) {
                     return labeledResult
                 }
@@ -477,7 +501,7 @@ final class MeetingTranscriptionService: ObservableObject {
                 )
                 self.fallbackNotice = "Speaker labeling was unavailable for this file. The transcript was completed without speaker labels."
                 self.progress = 0.3
-            } else if SettingsStore.shared.fileTranscriptionSpeakerLabelsEnabled, isVideoContainer {
+            } else if options.speakerLabelsEnabled, isVideoContainer {
                 DebugLogger.shared.info(
                     "Speaker labeling skipped for video container; using standard transcription",
                     source: "MeetingTranscriptionService"
@@ -676,15 +700,13 @@ final class MeetingTranscriptionService: ObservableObject {
         _ fileURL: URL,
         provider: TranscriptionProvider,
         duration: Double,
-        startTime: Date
+        startTime: Date,
+        expectedSpeakerCount: Int?
     ) async -> TranscriptionResult? {
         self.currentStatus = "Identifying speakers..."
         self.progress = 0.25
 
-        let expectedSpeakers = SettingsStore.shared.fileTranscriptionExpectedSpeakerCount
-        let diarizer = SpeakerDiarizationService(
-            expectedSpeakers: expectedSpeakers > 0 ? expectedSpeakers : nil
-        )
+        let diarizer = SpeakerDiarizationService(expectedSpeakers: expectedSpeakerCount)
 
         let turns: [SpeakerDiarizationService.SpeakerTurn]
         do {
