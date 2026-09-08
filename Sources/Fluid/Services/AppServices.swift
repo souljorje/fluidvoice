@@ -19,7 +19,8 @@ import Foundation
 
 /// Centralized container for app-wide services.
 /// This exists to reduce ContentView's generic type signature complexity,
-/// which has been observed to cause EXC_BAD_ACCESS crashes at app launch.
+/// which has been observed to cause EXC_BAD_ACCESS crashes during Swift
+/// runtime type metadata resolution at app launch.
 @MainActor
 final class AppServices: ObservableObject {
     /// Shared singleton instance
