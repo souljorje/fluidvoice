@@ -1,32 +1,38 @@
+import AudioToolbox
 import AVFoundation
-import CoreMedia
+import CoreAudio
 import Foundation
-import ScreenCaptureKit
 
 struct CallRecording: Sendable {
     let directoryURL: URL
     let audioURL: URL
     let systemAudioURL: URL?
     let microphoneAudioURL: URL?
+    let systemStartOffsetSeconds: Double?
+    let microphoneStartOffsetSeconds: Double?
+    let systemAudioHasSignal: Bool
     let startedAt: Date
     let duration: TimeInterval
 }
 
 enum CallTranscriptionError: LocalizedError {
-    case noDisplayAvailable
     case noAudioCaptured
     case notRecording
+    case microphoneUnavailable
+    case systemAudioUnavailable(String)
     case audioWriterFailed(String)
     case audioMixFailed(String)
 
     var errorDescription: String? {
         switch self {
-        case .noDisplayAvailable:
-            return "No display is available for system-audio capture."
         case .noAudioCaptured:
             return "No call audio was captured."
         case .notRecording:
             return "No call recording is active."
+        case .microphoneUnavailable:
+            return "No microphone is available for call recording."
+        case let .systemAudioUnavailable(detail):
+            return "System audio could not be captured. Allow FluidVoice to record system audio in Privacy & Security, then try again. \(detail)"
         case let .audioWriterFailed(message):
             return "Could not save call audio: \(message)"
         case let .audioMixFailed(message):
@@ -38,57 +44,112 @@ enum CallTranscriptionError: LocalizedError {
 private struct CapturedAudioTrack: Sendable {
     let url: URL
     let startOffsetSeconds: Double
+    let hasSignal: Bool
 }
 
-final class CallCaptureSession: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
-    private let sampleQueue = DispatchQueue(label: "com.fluidvoice.call-capture.audio", qos: .userInitiated)
-    private var stream: SCStream?
-    private var systemWriter: CallAudioTrackWriter?
-    private var microphoneWriter: CallAudioTrackWriter?
+/// Captures the two sides of a call independently:
+/// - system audio through a Core Audio process tap
+/// - the user's selected FluidVoice microphone through the existing direct Core Audio pipeline
+///
+/// Keeping the sources separate gives transcription a reliable "You" track and avoids asking
+/// ScreenCaptureKit for display access when the feature only needs audio.
+final class CallCaptureSession: @unchecked Sendable {
+    private let microphoneDevice: AudioDevice.Device
+    private var systemTap: CallSystemAudioTap?
+    private var systemCapture: DirectCoreAudioLifecycleController?
+    private var microphoneCapture: DirectCoreAudioLifecycleController?
+    private var systemWriter: CallPCMTrackWriter?
+    private var microphoneWriter: CallPCMTrackWriter?
     private var directoryURL: URL?
     private var startedAt: Date?
-    private var captureStartedUptime: TimeInterval?
-    private var captureError: Error?
+    private var captureStartedHostTime: UInt64?
+    private var recordingStamp: String?
+
+    init(microphoneDevice: AudioDevice.Device) {
+        self.microphoneDevice = microphoneDevice
+    }
 
     func start() async throws -> URL {
-        let directory = try Self.makeRecordingDirectory()
-        let systemURL = directory.appendingPathComponent("system.m4a")
-        let microphoneURL = directory.appendingPathComponent("microphone.m4a")
+        let startedAt = Date()
+        let stamp = Self.recordingStamp(for: startedAt)
+        let directory = try Self.makeRecordingDirectory(stamp: stamp)
+        let systemPCMURL = directory.appendingPathComponent("system.caf")
+        let microphonePCMURL = directory.appendingPathComponent("microphone.caf")
+        let captureStartedHostTime = AudioGetCurrentHostTime()
 
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        guard let display = content.displays.first else {
-            throw CallTranscriptionError.noDisplayAvailable
-        }
-
-        let filter = SCContentFilter(
-            display: display,
-            excludingApplications: [],
-            exceptingWindows: []
+        let systemWriter = CallPCMTrackWriter(
+            url: systemPCMURL,
+            captureStartedHostTime: captureStartedHostTime
         )
-        let configuration = SCStreamConfiguration()
-        configuration.capturesAudio = true
-        configuration.captureMicrophone = true
-        configuration.excludesCurrentProcessAudio = true
-        configuration.sampleRate = 48_000
-        configuration.channelCount = 2
-        configuration.showsCursor = false
-        configuration.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+        let microphoneWriter = CallPCMTrackWriter(
+            url: microphonePCMURL,
+            captureStartedHostTime: captureStartedHostTime
+        )
 
-        let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
         self.directoryURL = directory
-        self.startedAt = Date()
-        self.stream = stream
-        self.systemWriter = CallAudioTrackWriter(url: systemURL)
-        self.microphoneWriter = CallAudioTrackWriter(url: microphoneURL)
-        self.captureError = nil
+        self.startedAt = startedAt
+        self.recordingStamp = stamp
+        self.captureStartedHostTime = captureStartedHostTime
+        self.systemWriter = systemWriter
+        self.microphoneWriter = microphoneWriter
 
         do {
-            try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: self.sampleQueue)
-            try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: self.sampleQueue)
-            self.captureStartedUptime = ProcessInfo.processInfo.systemUptime
-            try await stream.startCapture()
+            let tap = try await CallSystemAudioTap.create()
+            self.systemTap = tap
+
+            let systemCapture = DirectCoreAudioLifecycleController(
+                packetHandler: { samples, frameCount, sampleRate, hostTime, _ in
+                    do {
+                        try systemWriter.append(
+                            samples: samples,
+                            frameCount: frameCount,
+                            sampleRate: sampleRate,
+                            hostTime: hostTime
+                        )
+                    } catch {
+                        systemWriter.record(error: error)
+                    }
+                },
+                installsHardwareListeners: false,
+                onFormatInvalidated: { _ in }
+            )
+            self.systemCapture = systemCapture
+            do {
+                _ = try await systemCapture.start(
+                    deviceID: tap.aggregateDeviceID,
+                    deviceName: "FluidVoice System Audio",
+                    reason: "call_recording"
+                )
+            } catch {
+                throw CallTranscriptionError.systemAudioUnavailable(error.localizedDescription)
+            }
+
+            let microphoneCapture = DirectCoreAudioLifecycleController(
+                packetHandler: { samples, frameCount, sampleRate, hostTime, _ in
+                    do {
+                        try microphoneWriter.append(
+                            samples: samples,
+                            frameCount: frameCount,
+                            sampleRate: sampleRate,
+                            hostTime: hostTime
+                        )
+                    } catch {
+                        microphoneWriter.record(error: error)
+                    }
+                },
+                installsHardwareListeners: false,
+                onFormatInvalidated: { _ in }
+            )
+            self.microphoneCapture = microphoneCapture
+            _ = try await microphoneCapture.start(
+                deviceID: self.microphoneDevice.id,
+                deviceName: self.microphoneDevice.name,
+                reason: "call_recording"
+            )
+
             return directory
         } catch {
+            await self.stopCaptureInfrastructure(reason: "call_start_failed")
             self.resetCaptureState()
             try? FileManager.default.removeItem(at: directory)
             throw error
@@ -96,116 +157,94 @@ final class CallCaptureSession: NSObject, SCStreamOutput, SCStreamDelegate, @unc
     }
 
     func stop() async throws -> CallRecording {
-        guard let directory = self.directoryURL, let startedAt = self.startedAt else {
+        guard let directory = self.directoryURL,
+              let startedAt = self.startedAt,
+              let stamp = self.recordingStamp
+        else {
             throw CallTranscriptionError.notRecording
         }
 
-        var stopError: Error?
-        if let stream = self.stream {
-            do {
-                try await stream.stopCapture()
-            } catch {
-                stopError = error
-            }
-        }
-        self.stream = nil
+        await self.stopCaptureInfrastructure(reason: "call_stop")
 
-        // ScreenCaptureKit invokes both audio outputs on this queue. Draining it guarantees
-        // every delivered sample has reached its writer before finalization begins.
-        self.sampleQueue.sync {}
-
-        let systemTrack = try await self.systemWriter?.finish()
-        let microphoneTrack = try await self.microphoneWriter?.finish()
+        let systemTrack = try self.systemWriter?.finish()
+        let microphoneTrack = try self.microphoneWriter?.finish()
         self.systemWriter = nil
         self.microphoneWriter = nil
-        self.directoryURL = nil
-        self.startedAt = nil
-        self.captureStartedUptime = nil
 
-        if let error = self.captureError ?? stopError {
-            self.captureError = nil
-            throw error
-        }
-        self.captureError = nil
+        let exportedSystemTrack = try await Self.exportTrack(
+            systemTrack,
+            to: directory.appendingPathComponent("system.m4a")
+        )
+        let exportedMicrophoneTrack = try await Self.exportTrack(
+            microphoneTrack,
+            to: directory.appendingPathComponent("microphone.m4a")
+        )
 
-        let tracks = [systemTrack, microphoneTrack].compactMap { $0 }
+        let tracks = [exportedSystemTrack, exportedMicrophoneTrack].compactMap { $0 }
         guard !tracks.isEmpty else {
+            self.resetCaptureState()
             throw CallTranscriptionError.noAudioCaptured
         }
 
+        let outputURL = directory.appendingPathComponent("call-\(stamp).m4a")
         let audioURL = try await CallAudioMixer.makeMixedRecording(
-            in: directory,
+            outputURL: outputURL,
             tracks: tracks
         )
         let duration = await Self.duration(of: audioURL)
 
-        return CallRecording(
+        let recording = CallRecording(
             directoryURL: directory,
             audioURL: audioURL,
-            systemAudioURL: systemTrack?.url,
-            microphoneAudioURL: microphoneTrack?.url,
+            systemAudioURL: exportedSystemTrack?.url,
+            microphoneAudioURL: exportedMicrophoneTrack?.url,
+            systemStartOffsetSeconds: exportedSystemTrack?.startOffsetSeconds,
+            microphoneStartOffsetSeconds: exportedMicrophoneTrack?.startOffsetSeconds,
+            systemAudioHasSignal: exportedSystemTrack?.hasSignal ?? false,
             startedAt: startedAt,
             duration: duration
         )
+        self.resetCaptureState()
+        return recording
     }
 
-    func stream(
-        _ stream: SCStream,
-        didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
-        of outputType: SCStreamOutputType
-    ) {
-        guard self.captureError == nil, let captureStartedUptime = self.captureStartedUptime else { return }
-        guard CMSampleBufferIsValid(sampleBuffer), CMSampleBufferDataIsReady(sampleBuffer) else { return }
-
-        let arrivalUptime = ProcessInfo.processInfo.systemUptime
-        do {
-            switch outputType {
-            case .audio:
-                try self.systemWriter?.append(
-                    sampleBuffer,
-                    captureStartedUptime: captureStartedUptime,
-                    arrivalUptime: arrivalUptime
-                )
-            case .microphone:
-                try self.microphoneWriter?.append(
-                    sampleBuffer,
-                    captureStartedUptime: captureStartedUptime,
-                    arrivalUptime: arrivalUptime
-                )
-            default:
-                break
-            }
-        } catch {
-            self.captureError = error
-            DebugLogger.shared.error(
-                "Call audio capture failed: \(error.localizedDescription)",
-                source: "CallCaptureSession"
-            )
+    private func stopCaptureInfrastructure(reason: String) async {
+        if let microphoneCapture = self.microphoneCapture {
+            _ = await microphoneCapture.stop(retainPrepared: false, reason: reason)
         }
-    }
+        self.microphoneCapture = nil
 
-    func stream(_ stream: SCStream, didStopWithError error: Error) {
-        self.sampleQueue.async { [weak self] in
-            guard let self, self.captureError == nil else { return }
-            self.captureError = error
-            DebugLogger.shared.error(
-                "Call capture stream stopped: \(error.localizedDescription)",
-                source: "CallCaptureSession"
-            )
+        if let systemCapture = self.systemCapture {
+            _ = await systemCapture.stop(retainPrepared: false, reason: reason)
         }
+        self.systemCapture = nil
+
+        self.systemTap?.destroy()
+        self.systemTap = nil
     }
 
     private func resetCaptureState() {
-        self.stream = nil
+        self.systemTap = nil
+        self.systemCapture = nil
+        self.microphoneCapture = nil
         self.systemWriter = nil
         self.microphoneWriter = nil
         self.directoryURL = nil
         self.startedAt = nil
-        self.captureStartedUptime = nil
-        self.captureError = nil
+        self.captureStartedHostTime = nil
+        self.recordingStamp = nil
     }
 
-    private static func makeRecordingDirectory() throws -> URL {
+    private static func recordingStamp(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        return formatter.string(from: date)
+    }
+
+    private static func makeRecordingDirectory(stamp: String) throws -> URL {
         let applicationSupport = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
@@ -213,9 +252,45 @@ final class CallCaptureSession: NSObject, SCStreamOutput, SCStreamDelegate, @unc
         let root = applicationSupport
             .appendingPathComponent("FluidVoice", isDirectory: true)
             .appendingPathComponent("Calls", isDirectory: true)
-        let directory = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let suffix = String(UUID().uuidString.prefix(6))
+        let directory = root.appendingPathComponent("\(stamp)-\(suffix)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
+    }
+
+    private static func exportTrack(
+        _ track: CapturedAudioTrack?,
+        to outputURL: URL
+    ) async throws -> CapturedAudioTrack? {
+        guard let track else { return nil }
+        try? FileManager.default.removeItem(at: outputURL)
+
+        let asset = AVURLAsset(url: track.url)
+        guard let exporter = AVAssetExportSession(
+            asset: asset,
+            presetName: AVAssetExportPresetAppleM4A
+        ) else {
+            throw CallTranscriptionError.audioWriterFailed("Could not create the audio exporter.")
+        }
+        exporter.outputURL = outputURL
+        exporter.outputFileType = .m4a
+
+        await withCheckedContinuation { continuation in
+            exporter.exportAsynchronously {
+                continuation.resume()
+            }
+        }
+        guard exporter.status == .completed else {
+            throw CallTranscriptionError.audioWriterFailed(
+                exporter.error?.localizedDescription ?? "Audio export did not complete."
+            )
+        }
+        try? FileManager.default.removeItem(at: track.url)
+        return CapturedAudioTrack(
+            url: outputURL,
+            startOffsetSeconds: track.startOffsetSeconds,
+            hasSignal: track.hasSignal
+        )
     }
 
     private static func duration(of url: URL) async -> TimeInterval {
@@ -226,160 +301,281 @@ final class CallCaptureSession: NSObject, SCStreamOutput, SCStreamDelegate, @unc
     }
 }
 
-private final class CallAudioTrackWriter: @unchecked Sendable {
-    private static let readinessTimeout: TimeInterval = 1
+/// Owns the Core Audio global process tap and the private aggregate device that exposes it as an
+/// input device. No screen or window frames are involved.
+private final class CallSystemAudioTap: @unchecked Sendable {
+    let tapID: AudioObjectID
+    let aggregateDeviceID: AudioObjectID
+    private let lock = NSLock()
+    private var isDestroyed = false
+
+    private init(tapID: AudioObjectID, aggregateDeviceID: AudioObjectID) {
+        self.tapID = tapID
+        self.aggregateDeviceID = aggregateDeviceID
+    }
+
+    deinit {
+        self.destroy()
+    }
+
+    static func create() async throws -> CallSystemAudioTap {
+        let excludedProcesses = Self.currentProcessObjectID().map { [$0] } ?? []
+        let tapDescription = CATapDescription(
+            stereoGlobalTapButExcludeProcesses: excludedProcesses
+        )
+        tapDescription.name = "FluidVoice Call System Audio"
+        tapDescription.isPrivate = true
+        tapDescription.muteBehavior = .unmuted
+        tapDescription.uuid = UUID()
+
+        var tapID = AudioObjectID(kAudioObjectUnknown)
+        let tapStatus = AudioHardwareCreateProcessTap(tapDescription, &tapID)
+        guard tapStatus == noErr, tapID != kAudioObjectUnknown else {
+            throw CallTranscriptionError.systemAudioUnavailable(
+                "Core Audio could not create a system-audio tap (OSStatus \(tapStatus))."
+            )
+        }
+
+        let aggregateUID = "com.fluidvoice.call-audio.\(UUID().uuidString)"
+        let aggregateDescription: [String: Any] = [
+            kAudioAggregateDeviceNameKey: "FluidVoice Call Audio",
+            kAudioAggregateDeviceUIDKey: aggregateUID,
+            kAudioAggregateDeviceIsPrivateKey: true,
+            kAudioAggregateDeviceIsStackedKey: false,
+            kAudioAggregateDeviceTapAutoStartKey: true,
+            kAudioAggregateDeviceTapListKey: [[
+                kAudioSubTapUIDKey: tapDescription.uuid.uuidString,
+                kAudioSubTapDriftCompensationKey: true,
+            ]],
+        ]
+
+        var aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
+        let aggregateStatus = AudioHardwareCreateAggregateDevice(
+            aggregateDescription as CFDictionary,
+            &aggregateDeviceID
+        )
+        guard aggregateStatus == noErr, aggregateDeviceID != kAudioObjectUnknown else {
+            AudioHardwareDestroyProcessTap(tapID)
+            throw CallTranscriptionError.systemAudioUnavailable(
+                "Core Audio could not create the private capture device (OSStatus \(aggregateStatus))."
+            )
+        }
+
+        do {
+            try await Self.waitUntilAlive(deviceID: aggregateDeviceID)
+        } catch {
+            AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
+            AudioHardwareDestroyProcessTap(tapID)
+            throw error
+        }
+
+        return CallSystemAudioTap(
+            tapID: tapID,
+            aggregateDeviceID: aggregateDeviceID
+        )
+    }
+
+    func destroy() {
+        self.lock.lock()
+        guard !self.isDestroyed else {
+            self.lock.unlock()
+            return
+        }
+        self.isDestroyed = true
+        self.lock.unlock()
+
+        if self.aggregateDeviceID != kAudioObjectUnknown {
+            AudioHardwareDestroyAggregateDevice(self.aggregateDeviceID)
+        }
+        if self.tapID != kAudioObjectUnknown {
+            AudioHardwareDestroyProcessTap(self.tapID)
+        }
+    }
+
+    private static func waitUntilAlive(deviceID: AudioObjectID) async throws {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceIsAlive,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        for _ in 0..<30 {
+            var isAlive: UInt32 = 0
+            var size = UInt32(MemoryLayout<UInt32>.size)
+            let status = AudioObjectGetPropertyData(
+                deviceID,
+                &address,
+                0,
+                nil,
+                &size,
+                &isAlive
+            )
+            if status == noErr, isAlive != 0 {
+                return
+            }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+
+        throw CallTranscriptionError.systemAudioUnavailable(
+            "The Core Audio capture device did not become ready."
+        )
+    }
+
+    private static func currentProcessObjectID() -> AudioObjectID? {
+        var pid = getpid()
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var processObjectID = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        let status = withUnsafeMutablePointer(to: &pid) { pidPointer in
+            AudioObjectGetPropertyData(
+                AudioObjectID(kAudioObjectSystemObject),
+                &address,
+                UInt32(MemoryLayout<pid_t>.size),
+                pidPointer,
+                &size,
+                &processObjectID
+            )
+        }
+        guard status == noErr, processObjectID != kAudioObjectUnknown else { return nil }
+        return processObjectID
+    }
+}
+
+/// File writer used after the repository's realtime-safe direct capture ring. The packet callback
+/// is already off Core Audio's IO thread, so encoding/file IO here cannot block the realtime path.
+private final class CallPCMTrackWriter: @unchecked Sendable {
+    private static let maximumFramesPerPacket: AVAudioFrameCount = 8192
+    private static let signalThreshold: Float = 0.000_01
 
     private let url: URL
-    private var writer: AVAssetWriter?
-    private var input: AVAssetWriterInput?
-    private var startOffsetSeconds: Double?
-    private var hasAppendedSamples = false
+    private let captureStartedHostTime: UInt64
+    private let lock = NSLock()
+    private var audioFile: AVAudioFile?
+    private var audioFormat: AVAudioFormat?
+    private var reusableBuffer: AVAudioPCMBuffer?
+    private var firstHostTime: UInt64?
+    private var hasWrittenAudio = false
+    private var peakMagnitude: Float = 0
+    private var storedError: Error?
 
-    init(url: URL) {
+    init(url: URL, captureStartedHostTime: UInt64) {
         self.url = url
+        self.captureStartedHostTime = captureStartedHostTime
     }
 
     func append(
-        _ sampleBuffer: CMSampleBuffer,
-        captureStartedUptime: TimeInterval,
-        arrivalUptime: TimeInterval
+        samples: UnsafePointer<Float>,
+        frameCount: Int,
+        sampleRate: Double,
+        hostTime: UInt64
     ) throws {
-        if self.writer == nil {
-            try self.prepareWriter(
-                for: sampleBuffer,
-                captureStartedUptime: captureStartedUptime,
-                arrivalUptime: arrivalUptime
-            )
+        guard frameCount > 0, sampleRate > 0 else { return }
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        if let storedError = self.storedError {
+            throw storedError
         }
 
-        guard let writer, let input else { return }
-        guard writer.status == .writing else {
+        if self.audioFile == nil {
+            try self.prepare(sampleRate: sampleRate)
+            self.firstHostTime = hostTime
+        }
+        guard let audioFile = self.audioFile,
+              let buffer = self.reusableBuffer,
+              let channel = buffer.floatChannelData?.pointee
+        else {
+            throw CallTranscriptionError.audioWriterFailed("Could not prepare the PCM writer.")
+        }
+        guard frameCount <= Int(buffer.frameCapacity) else {
             throw CallTranscriptionError.audioWriterFailed(
-                writer.error?.localizedDescription ?? "Audio writer is not running."
+                "Captured audio packet exceeded the supported frame count."
             )
         }
 
-        try self.waitUntilReady(input, writer: writer)
-
-        guard input.append(sampleBuffer) else {
-            throw CallTranscriptionError.audioWriterFailed(
-                writer.error?.localizedDescription ?? "Could not append audio samples."
-            )
+        buffer.frameLength = AVAudioFrameCount(frameCount)
+        channel.update(from: samples, count: frameCount)
+        for index in 0..<frameCount {
+            self.peakMagnitude = max(self.peakMagnitude, abs(samples[index]))
         }
-        self.hasAppendedSamples = true
+        try audioFile.write(from: buffer)
+        self.hasWrittenAudio = true
     }
 
-    func finish() async throws -> CapturedAudioTrack? {
-        guard self.hasAppendedSamples,
-              let writer,
-              let input,
-              let startOffsetSeconds
-        else {
+    func record(error: Error) {
+        self.lock.lock()
+        if self.storedError == nil {
+            self.storedError = error
+        }
+        self.lock.unlock()
+    }
+
+    func finish() throws -> CapturedAudioTrack? {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        if let storedError = self.storedError {
+            throw storedError
+        }
+        guard self.hasWrittenAudio, let firstHostTime = self.firstHostTime else {
+            self.audioFile = nil
+            self.reusableBuffer = nil
             try? FileManager.default.removeItem(at: self.url)
             return nil
         }
 
-        input.markAsFinished()
-        await withCheckedContinuation { continuation in
-            writer.finishWriting {
-                continuation.resume()
-            }
-        }
+        self.audioFile = nil
+        self.audioFormat = nil
+        self.reusableBuffer = nil
 
-        guard writer.status == .completed else {
-            throw CallTranscriptionError.audioWriterFailed(
-                writer.error?.localizedDescription ?? "Audio writer did not finish successfully."
-            )
-        }
+        let delta = firstHostTime >= self.captureStartedHostTime
+            ? firstHostTime - self.captureStartedHostTime
+            : 0
+        let offset = Double(AudioConvertHostTimeToNanos(delta)) / 1_000_000_000
         return CapturedAudioTrack(
             url: self.url,
-            startOffsetSeconds: startOffsetSeconds
+            startOffsetSeconds: offset.isFinite ? max(0, offset) : 0,
+            hasSignal: self.peakMagnitude >= Self.signalThreshold
         )
     }
 
-    private func prepareWriter(
-        for sampleBuffer: CMSampleBuffer,
-        captureStartedUptime: TimeInterval,
-        arrivalUptime: TimeInterval
-    ) throws {
-        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
-              let basicDescription = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription)?.pointee
-        else {
-            throw CallTranscriptionError.audioWriterFailed("Missing audio format description.")
-        }
-
-        let firstPresentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        let firstPresentationSeconds = CMTimeGetSeconds(firstPresentationTime)
-        guard firstPresentationSeconds.isFinite else {
-            throw CallTranscriptionError.audioWriterFailed("Captured audio has an invalid timestamp.")
-        }
-
-        let bufferDuration = CMTimeGetSeconds(CMSampleBufferGetDuration(sampleBuffer))
-        let safeBufferDuration = bufferDuration.isFinite ? max(0, bufferDuration) : 0
-        let estimatedBufferStartUptime = arrivalUptime - safeBufferDuration
-        let startOffsetSeconds = max(0, estimatedBufferStartUptime - captureStartedUptime)
-
+    private func prepare(sampleRate: Double) throws {
         try? FileManager.default.removeItem(at: self.url)
-        let writer = try AVAssetWriter(outputURL: self.url, fileType: .m4a)
-        let channels = max(1, Int(basicDescription.mChannelsPerFrame))
-        let sampleRate = basicDescription.mSampleRate > 0 ? basicDescription.mSampleRate : 48_000
-        let settings: [String: Any] = [
-            AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
-            AVSampleRateKey: sampleRate,
-            AVNumberOfChannelsKey: channels,
-            AVEncoderBitRateKey: channels > 1 ? 192_000 : 96_000,
-        ]
-        let input = AVAssetWriterInput(
-            mediaType: .audio,
-            outputSettings: settings,
-            sourceFormatHint: formatDescription
-        )
-        input.expectsMediaDataInRealTime = true
-
-        guard writer.canAdd(input) else {
-            throw CallTranscriptionError.audioWriterFailed("Audio writer rejected the captured format.")
-        }
-        writer.add(input)
-        guard writer.startWriting() else {
-            throw CallTranscriptionError.audioWriterFailed(
-                writer.error?.localizedDescription ?? "Could not start audio writer."
+        guard let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: sampleRate,
+            channels: 1,
+            interleaved: false
+        ),
+            let buffer = AVAudioPCMBuffer(
+                pcmFormat: format,
+                frameCapacity: Self.maximumFramesPerPacket
             )
+        else {
+            throw CallTranscriptionError.audioWriterFailed("Could not create the PCM format.")
         }
-        writer.startSession(atSourceTime: firstPresentationTime)
 
-        self.writer = writer
-        self.input = input
-        self.startOffsetSeconds = startOffsetSeconds
-    }
-
-    private func waitUntilReady(_ input: AVAssetWriterInput, writer: AVAssetWriter) throws {
-        let deadline = ProcessInfo.processInfo.systemUptime + Self.readinessTimeout
-        while !input.isReadyForMoreMediaData {
-            guard writer.status == .writing else {
-                throw CallTranscriptionError.audioWriterFailed(
-                    writer.error?.localizedDescription ?? "Audio writer stopped while encoding."
-                )
-            }
-            guard ProcessInfo.processInfo.systemUptime < deadline else {
-                throw CallTranscriptionError.audioWriterFailed(
-                    "Audio encoder fell behind for more than \(Int(Self.readinessTimeout * 1000)) ms."
-                )
-            }
-            Thread.sleep(forTimeInterval: 0.001)
-        }
+        self.audioFile = try AVAudioFile(
+            forWriting: self.url,
+            settings: format.settings,
+            commonFormat: .pcmFormatFloat32,
+            interleaved: false
+        )
+        self.audioFormat = format
+        self.reusableBuffer = buffer
     }
 }
 
 private enum CallAudioMixer {
     static func makeMixedRecording(
-        in directory: URL,
+        outputURL: URL,
         tracks: [CapturedAudioTrack]
     ) async throws -> URL {
         guard let anchorSeconds = tracks.map(\.startOffsetSeconds).min() else {
             throw CallTranscriptionError.noAudioCaptured
         }
-
-        let outputURL = directory.appendingPathComponent("call.m4a")
         try? FileManager.default.removeItem(at: outputURL)
 
         let composition = AVMutableComposition()
@@ -434,7 +630,6 @@ private enum CallAudioMixer {
                 continuation.resume()
             }
         }
-
         guard exporter.status == .completed else {
             throw CallTranscriptionError.audioMixFailed(
                 exporter.error?.localizedDescription ?? "Audio export did not complete."
