@@ -35,7 +35,6 @@ final class CallRecordingIndicatorController {
                     ]
                 )
                 button.toolTip = "FluidVoice is recording a call"
-                button.isEnabled = false
             }
             self.statusItem = item
             return
