@@ -32,9 +32,16 @@ final class CallTranscriptionService: ObservableObject {
 
     func start() async throws {
         guard !self.isRecording, !self.isTranscribing else { return }
+        guard let microphone = AppServices.shared
+            .microphonePreferenceCoordinator
+            .inputDeviceForCapture()
+        else {
+            self.status = "Call capture failed"
+            throw CallTranscriptionError.microphoneUnavailable
+        }
 
         self.status = "Starting call capture..."
-        let session = CallCaptureSession()
+        let session = CallCaptureSession(microphoneDevice: microphone)
         do {
             let directory = try await session.start()
             self.captureSession = session
@@ -74,13 +81,10 @@ final class CallTranscriptionService: ObservableObject {
         self.isTranscribing = true
         defer { self.isTranscribing = false }
 
-        let transcription = MeetingTranscriptionService(asrService: self.asrService)
+        let transcription = CallTrackTranscriptionService(asrService: self.asrService)
         do {
-            self.status = "Transcribing call..."
-            let result = try await transcription.transcribeFile(
-                recording.audioURL,
-                options: .call
-            )
+            self.status = "Transcribing call speakers..."
+            let result = try await transcription.transcribe(recording)
             self.lastResult = result
             self.status = "Call transcript complete"
             return result
