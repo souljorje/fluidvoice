@@ -374,7 +374,10 @@ private final class CallPCMTrackWriter: @unchecked Sendable {
     private let lock = NSLock()
     private var audioFile: AVAudioFile?
     private var reusableBuffer: AVAudioPCMBuffer?
+    private var streamSampleRate: Double?
     private var firstHostTime: UInt64?
+    private var previousHostTime: UInt64?
+    private var previousFrameCount = 0
     private var hasWrittenAudio = false
     private var storedError: Error?
 
@@ -399,10 +402,19 @@ private final class CallPCMTrackWriter: @unchecked Sendable {
         if self.audioFile == nil {
             try self.prepare(sampleRate: sampleRate)
             self.firstHostTime = hostTime
+            self.streamSampleRate = sampleRate
+        } else if let streamSampleRate = self.streamSampleRate,
+                  abs(streamSampleRate - sampleRate) > 0.5
+        {
+            throw CallTranscriptionError.audioWriterFailed(
+                "Captured audio sample rate changed during the call."
+            )
         }
+
         guard let audioFile = self.audioFile,
               let buffer = self.reusableBuffer,
-              let channel = buffer.floatChannelData?.pointee
+              let channel = buffer.floatChannelData?.pointee,
+              let streamSampleRate = self.streamSampleRate
         else {
             throw CallTranscriptionError.audioWriterFailed("Could not prepare the PCM writer.")
         }
@@ -412,9 +424,19 @@ private final class CallPCMTrackWriter: @unchecked Sendable {
             )
         }
 
+        try self.insertMissingSilence(
+            beforeHostTime: hostTime,
+            sampleRate: streamSampleRate,
+            audioFile: audioFile,
+            buffer: buffer,
+            channel: channel
+        )
+
         buffer.frameLength = AVAudioFrameCount(frameCount)
         channel.update(from: samples, count: frameCount)
         try audioFile.write(from: buffer)
+        self.previousHostTime = hostTime
+        self.previousFrameCount = frameCount
         self.hasWrittenAudio = true
     }
 
@@ -475,6 +497,36 @@ private final class CallPCMTrackWriter: @unchecked Sendable {
             interleaved: false
         )
         self.reusableBuffer = buffer
+    }
+
+    private func insertMissingSilence(
+        beforeHostTime hostTime: UInt64,
+        sampleRate: Double,
+        audioFile: AVAudioFile,
+        buffer: AVAudioPCMBuffer,
+        channel: UnsafeMutablePointer<Float>
+    ) throws {
+        guard let previousHostTime = self.previousHostTime,
+              self.previousFrameCount > 0,
+              hostTime >= previousHostTime
+        else { return }
+
+        let hostDeltaSeconds = Double(
+            AudioConvertHostTimeToNanos(hostTime - previousHostTime)
+        ) / 1_000_000_000
+        let expectedDeltaSeconds = Double(self.previousFrameCount) / sampleRate
+        let missingSeconds = hostDeltaSeconds - expectedDeltaSeconds
+        let toleranceSeconds = max(0.001, expectedDeltaSeconds * 0.25)
+        guard missingSeconds > toleranceSeconds else { return }
+
+        var missingFrames = Int((missingSeconds * sampleRate).rounded())
+        while missingFrames > 0 {
+            let frameCount = min(missingFrames, Int(buffer.frameCapacity))
+            buffer.frameLength = AVAudioFrameCount(frameCount)
+            channel.update(repeating: 0, count: frameCount)
+            try audioFile.write(from: buffer)
+            missingFrames -= frameCount
+        }
     }
 }
 
