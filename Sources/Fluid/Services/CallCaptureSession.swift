@@ -6,8 +6,6 @@ import Foundation
 struct CallRecording: Sendable {
     let directoryURL: URL
     let audioURL: URL
-    let startedAt: Date
-    let duration: TimeInterval
 }
 
 enum CallTranscriptionError: LocalizedError {
@@ -52,8 +50,6 @@ final class CallCaptureSession: @unchecked Sendable {
     private var systemWriter: CallPCMTrackWriter?
     private var microphoneWriter: CallPCMTrackWriter?
     private var directoryURL: URL?
-    private var startedAt: Date?
-    private var captureStartedHostTime: UInt64?
     private var recordingStamp: String?
 
     init(microphoneDevice: AudioDevice.Device) {
@@ -61,8 +57,7 @@ final class CallCaptureSession: @unchecked Sendable {
     }
 
     func start() async throws -> URL {
-        let startedAt = Date()
-        let stamp = Self.recordingStamp(for: startedAt)
+        let stamp = Self.recordingStamp(for: Date())
         let directory = try Self.makeRecordingDirectory(stamp: stamp)
         let systemPCMURL = directory.appendingPathComponent("system.caf")
         let microphonePCMURL = directory.appendingPathComponent("microphone.caf")
@@ -78,9 +73,7 @@ final class CallCaptureSession: @unchecked Sendable {
         )
 
         self.directoryURL = directory
-        self.startedAt = startedAt
         self.recordingStamp = stamp
-        self.captureStartedHostTime = captureStartedHostTime
         self.systemWriter = systemWriter
         self.microphoneWriter = microphoneWriter
 
@@ -149,7 +142,6 @@ final class CallCaptureSession: @unchecked Sendable {
 
     func stop() async throws -> CallRecording {
         guard let directory = self.directoryURL,
-              let startedAt = self.startedAt,
               let stamp = self.recordingStamp
         else {
             throw CallTranscriptionError.notRecording
@@ -182,13 +174,10 @@ final class CallCaptureSession: @unchecked Sendable {
             outputURL: outputURL,
             tracks: tracks
         )
-        let duration = await Self.duration(of: audioURL)
 
         let recording = CallRecording(
             directoryURL: directory,
-            audioURL: audioURL,
-            startedAt: startedAt,
-            duration: duration
+            audioURL: audioURL
         )
         self.resetCaptureState()
         return recording
@@ -216,8 +205,6 @@ final class CallCaptureSession: @unchecked Sendable {
         self.systemWriter = nil
         self.microphoneWriter = nil
         self.directoryURL = nil
-        self.startedAt = nil
-        self.captureStartedHostTime = nil
         self.recordingStamp = nil
     }
 
@@ -276,13 +263,6 @@ final class CallCaptureSession: @unchecked Sendable {
             url: outputURL,
             startOffsetSeconds: track.startOffsetSeconds
         )
-    }
-
-    private static func duration(of url: URL) async -> TimeInterval {
-        let asset = AVURLAsset(url: url)
-        guard let duration = try? await asset.load(.duration) else { return 0 }
-        let seconds = CMTimeGetSeconds(duration)
-        return seconds.isFinite ? max(0, seconds) : 0
     }
 }
 
@@ -530,7 +510,7 @@ private final class CallPCMTrackWriter: @unchecked Sendable {
         ),
             let buffer = AVAudioPCMBuffer(
                 pcmFormat: format,
-                frameCapacity: 8192
+                frameCapacity: Self.maximumFramesPerPacket
             )
         else {
             throw CallTranscriptionError.audioWriterFailed("Could not create the PCM format.")
