@@ -121,17 +121,14 @@ final class AppServices: ObservableObject {
 
     // MARK: - Safe Initialization
 
-    /// Safely initialize all services after the UI is ready.
-    /// This is the recommended way to start services - call this from ContentView.onAppear
-    /// after the delay has passed.
+    /// Safely initialize core services after the UI is ready.
+    /// Call transcription remains lazy until the menu bar requests it.
     func initializeServicesIfNeeded() {
         guard self.isUIReady else {
             DebugLogger.shared.warning("⚠️ initializeServicesIfNeeded called before UI ready - deferring", source: "AppServices")
             return
         }
 
-        // Access the core services to trigger lazy initialization. Call transcription stays lazy
-        // until the menu bar asks for it.
         _ = self.audioObserver
         _ = self.asr
 
