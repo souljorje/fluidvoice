@@ -85,22 +85,7 @@ final class AppServices: ObservableObject {
         }
         let service = CallTranscriptionService(asrService: self.asr)
         self._callTranscription = service
-        self._callRecordingIndicator = CallRecordingIndicatorController(
-            callTranscriptionService: service
-        )
         return service
-    }
-
-    private var _callRecordingIndicator: CallRecordingIndicatorController?
-    var callRecordingIndicator: CallRecordingIndicatorController {
-        if let existing = self._callRecordingIndicator {
-            return existing
-        }
-        let controller = CallRecordingIndicatorController(
-            callTranscriptionService: self.callTranscription
-        )
-        self._callRecordingIndicator = controller
-        return controller
     }
 
     private var cancellables = Set<AnyCancellable>()
@@ -149,7 +134,6 @@ final class AppServices: ObservableObject {
         _ = self.audioObserver
         _ = self.asr
         _ = self.callTranscription
-        _ = self.callRecordingIndicator
 
         DebugLogger.shared.info("✅ All services initialized", source: "AppServices")
     }
@@ -158,8 +142,6 @@ final class AppServices: ObservableObject {
         if let callTranscription = self._callTranscription {
             await callTranscription.stopForTermination()
         }
-        self._callRecordingIndicator?.hide()
-        self._callRecordingIndicator = nil
         self._callTranscription = nil
 
         if let asr = self._asr {
