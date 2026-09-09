@@ -12,6 +12,7 @@ final class CallTranscriptionService: ObservableObject {
 
     private let asrService: ASRService
     private var captureSession: CallCaptureSession?
+    private var voiceProcessedMicrophoneCapture: CallVoiceProcessedMicrophoneCapture?
     private var startedAt: Date?
     private var durationTask: Task<Void, Never>?
 
@@ -46,6 +47,26 @@ final class CallTranscriptionService: ObservableObject {
             let directory = try await session.start()
             self.captureSession = session
             self.lastRecordingDirectory = directory
+
+            // Run Apple's VoiceProcessingIO path in parallel with the existing raw microphone
+            // capture. This is deliberately an A/B prototype: microphone.m4a remains the raw mic,
+            // while microphone-voice-processing.wav is Apple's processed version and becomes the
+            // local transcription source only when the prototype starts and captures signal.
+            let voiceProcessedCapture = CallVoiceProcessedMicrophoneCapture(
+                microphoneDevice: microphone,
+                outputURL: directory.appendingPathComponent("microphone-voice-processing.wav")
+            )
+            do {
+                try voiceProcessedCapture.start()
+                self.voiceProcessedMicrophoneCapture = voiceProcessedCapture
+            } catch {
+                self.voiceProcessedMicrophoneCapture = nil
+                DebugLogger.shared.info(
+                    "Apple voice-processing prototype unavailable; keeping raw microphone path: \(error.localizedDescription)",
+                    source: "CallTranscriptionService"
+                )
+            }
+
             self.startedAt = Date()
             self.elapsedSeconds = 0
             self.isRecording = true
@@ -69,14 +90,21 @@ final class CallTranscriptionService: ObservableObject {
         self.status = "Finalizing call audio..."
         self.captureSession = nil
 
-        let recording: CallRecording
+        let voiceProcessedTrack = self.stopVoiceProcessedMicrophoneCapture()
+
+        let rawRecording: CallRecording
         do {
-            recording = try await session.stop()
-            self.lastRecordingDirectory = recording.directoryURL
+            rawRecording = try await session.stop()
+            self.lastRecordingDirectory = rawRecording.directoryURL
         } catch {
             self.status = "Call capture failed"
             throw error
         }
+
+        let recording = Self.recordingUsingVoiceProcessedMicrophoneIfAvailable(
+            rawRecording,
+            voiceProcessedTrack: voiceProcessedTrack
+        )
 
         self.isTranscribing = true
         defer { self.isTranscribing = false }
@@ -97,10 +125,63 @@ final class CallTranscriptionService: ObservableObject {
     func stopForTermination() async {
         self.durationTask?.cancel()
         self.durationTask = nil
+        _ = self.stopVoiceProcessedMicrophoneCapture()
         guard let session = self.captureSession else { return }
         self.captureSession = nil
         self.isRecording = false
         _ = try? await session.stop()
+    }
+
+    private func stopVoiceProcessedMicrophoneCapture() -> CallVoiceProcessedMicrophoneCapture.Track? {
+        guard let capture = self.voiceProcessedMicrophoneCapture else { return nil }
+        self.voiceProcessedMicrophoneCapture = nil
+        do {
+            let track = try capture.stop()
+            guard track.hasSignal else {
+                DebugLogger.shared.info(
+                    "Apple voice-processing prototype captured no meaningful signal; using raw microphone track",
+                    source: "CallTranscriptionService"
+                )
+                return nil
+            }
+            return track
+        } catch {
+            DebugLogger.shared.warning(
+                "Apple voice-processing prototype failed; using raw microphone track: \(error.localizedDescription)",
+                source: "CallTranscriptionService"
+            )
+            return nil
+        }
+    }
+
+    private static func recordingUsingVoiceProcessedMicrophoneIfAvailable(
+        _ recording: CallRecording,
+        voiceProcessedTrack: CallVoiceProcessedMicrophoneCapture.Track?
+    ) -> CallRecording {
+        guard let voiceProcessedTrack else { return recording }
+
+        let captureStartOffset = max(
+            0,
+            voiceProcessedTrack.startedAt.timeIntervalSince(recording.startedAt)
+        )
+        let firstAudioOffset = captureStartOffset + voiceProcessedTrack.firstAudioOffsetSeconds
+
+        DebugLogger.shared.info(
+            "Using Apple voice-processed microphone for local call attribution [offset=\(String(format: "%.3f", firstAudioOffset))s]; raw microphone.m4a preserved for A/B comparison",
+            source: "CallTranscriptionService"
+        )
+
+        return CallRecording(
+            directoryURL: recording.directoryURL,
+            audioURL: recording.audioURL,
+            systemAudioURL: recording.systemAudioURL,
+            microphoneAudioURL: voiceProcessedTrack.url,
+            systemStartOffsetSeconds: recording.systemStartOffsetSeconds,
+            microphoneStartOffsetSeconds: firstAudioOffset,
+            systemAudioHasSignal: recording.systemAudioHasSignal,
+            startedAt: recording.startedAt,
+            duration: recording.duration
+        )
     }
 
     private func startDurationUpdates() {
