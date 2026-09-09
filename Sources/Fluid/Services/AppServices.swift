@@ -130,10 +130,10 @@ final class AppServices: ObservableObject {
             return
         }
 
-        // Access the properties to trigger lazy initialization
+        // Access the core services to trigger lazy initialization. Call transcription stays lazy
+        // until the menu bar asks for it.
         _ = self.audioObserver
         _ = self.asr
-        _ = self.callTranscription
 
         DebugLogger.shared.info("✅ All services initialized", source: "AppServices")
     }
