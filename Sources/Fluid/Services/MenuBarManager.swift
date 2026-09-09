@@ -21,7 +21,6 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
     private var statusMenuItem: NSMenuItem?
     private var copyLastTranscriptMenuItem: NSMenuItem?
     private var callTranscriptionMenuItem: NSMenuItem?
-    private var revealLastCallRecordingMenuItem: NSMenuItem?
     private var rollbackMenuItem: NSMenuItem?
     private var microphoneMenuItem: NSMenuItem?
     private var microphoneSubmenu: NSMenu?
@@ -652,15 +651,6 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
         menu.addItem(callTranscriptionItem)
         self.callTranscriptionMenuItem = callTranscriptionItem
 
-        let revealLastCallRecordingItem = NSMenuItem(
-            title: "Reveal Last Call Recording",
-            action: #selector(revealLastCallRecording(_:)),
-            keyEquivalent: ""
-        )
-        revealLastCallRecordingItem.target = self
-        menu.addItem(revealLastCallRecordingItem)
-        self.revealLastCallRecordingMenuItem = revealLastCallRecordingItem
-
         menu.addItem(.separator())
 
         // Open Main Window
@@ -755,7 +745,6 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
         }
 
         self.copyLastTranscriptMenuItem?.isEnabled = self.canCopyLastTranscript
-        self.revealLastCallRecordingMenuItem?.isEnabled = call?.lastRecordingDirectory != nil
         self.microphoneMenuItem?.isEnabled = !(call?.isRecording ?? false)
 
         // Update rollback availability text
@@ -875,7 +864,7 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
         Task { @MainActor in
             do {
                 if call.isRecording {
-                    _ = try await call.stopAndTranscribe()
+                    try await call.stopAndTranscribe()
                 } else {
                     try await call.start()
                 }
@@ -888,11 +877,6 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
                 alert.runModal()
             }
         }
-    }
-
-    @objc private func revealLastCallRecording(_ sender: Any?) {
-        guard let directory = self.callTranscriptionService?.lastRecordingDirectory else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([directory])
     }
 
     @objc private func selectMicrophone(_ sender: NSMenuItem) {
