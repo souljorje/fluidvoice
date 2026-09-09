@@ -1,7 +1,7 @@
 import Foundation
 
 /// Transcribes the two call tracks independently, then merges their timestamped speaker turns.
-/// The microphone is known to be the local user, so diarization never has to rediscover "You".
+/// The microphone is authoritative for `You`; the system track is authoritative for remote voices.
 @MainActor
 final class CallTrackTranscriptionService {
     private let asrService: ASRService
@@ -23,33 +23,40 @@ final class CallTrackTranscriptionService {
         var segments: [SpeakerTranscriptSegment] = []
         var gaps: [SpeakerTranscriptGap] = []
         var notices: [String] = []
+        var remoteCallSegmentsForSuppression: [SpeakerTranscriptSegment] = []
 
-        if let microphoneURL = recording.microphoneAudioURL {
-            let result = try await self.transcribeTemporaryTrack(
-                microphoneURL,
-                options: FileTranscriptionOptions(
-                    speakerLabelsEnabled: true,
-                    expectedSpeakerCount: 1
-                )
-            )
-            trackResults.append(result)
-            let shift = max(0, (recording.microphoneStartOffsetSeconds ?? anchor) - anchor)
-            segments += Self.localSegments(from: result, shift: shift)
-            gaps += Self.shiftedGaps(result.speakerLabelingGaps, by: shift)
-            if let notice = result.speakerLabelingNotice {
-                notices.append("Local track: \(notice)")
-            }
-        }
-
+        // Transcribe the remote/system side first. Its diarized speech intervals can then be used
+        // to remove acoustic speaker leakage from the microphone before we label anything as You.
         if recording.systemAudioHasSignal, let systemURL = recording.systemAudioURL {
             let result = try await self.transcribeTemporaryTrack(
                 systemURL,
                 options: .call
             )
             trackResults.append(result)
+
             let shift = max(0, (recording.systemStartOffsetSeconds ?? anchor) - anchor)
-            segments += Self.remoteSegments(from: result, shift: shift)
+            let remoteSegments = Self.remoteSegments(from: result, shift: shift)
+            segments += remoteSegments
             gaps += Self.shiftedGaps(result.speakerLabelingGaps, by: shift)
+
+            // Only real diarized intervals are safe for leakage suppression. A standard-transcript
+            // fallback is represented as one full-file segment and must not mute the whole mic.
+            if !result.speakerSegments.isEmpty {
+                remoteCallSegmentsForSuppression = result.speakerSegments.map {
+                    SpeakerTranscriptSegment(
+                        speaker: $0.speaker,
+                        startSeconds: $0.startSeconds + shift,
+                        endSeconds: $0.endSeconds + shift,
+                        text: $0.text
+                    )
+                }
+            } else {
+                DebugLogger.shared.info(
+                    "Remote diarization produced no timed segments; microphone leakage suppression skipped",
+                    source: "CallTrackTranscriptionService"
+                )
+            }
+
             if let notice = result.speakerLabelingNotice {
                 notices.append("Remote track: \(notice)")
             }
@@ -57,6 +64,69 @@ final class CallTrackTranscriptionService {
             notices.append(
                 "No system-audio signal was detected. If the remote side was speaking, check FluidVoice's System Audio Recording permission."
             )
+        }
+
+        if let microphoneURL = recording.microphoneAudioURL {
+            let shift = max(0, (recording.microphoneStartOffsetSeconds ?? anchor) - anchor)
+            var localInputURL = microphoneURL
+            var isolatedLocalTrack: CallMicrophoneLeakageSuppressor.Result?
+
+            if !remoteCallSegmentsForSuppression.isEmpty {
+                do {
+                    isolatedLocalTrack = try await CallMicrophoneLeakageSuppressor.makeLocalOnlyTrack(
+                        microphoneURL: microphoneURL,
+                        microphoneShiftSeconds: shift,
+                        remoteCallSegments: remoteCallSegmentsForSuppression,
+                        outputDirectory: recording.directoryURL
+                    )
+                    if let isolatedLocalTrack {
+                        localInputURL = isolatedLocalTrack.url
+                        DebugLogger.shared.info(
+                            "Suppressed \(isolatedLocalTrack.mutedRangeCount) remote-speech ranges from microphone attribution",
+                            source: "CallTrackTranscriptionService"
+                        )
+                    }
+                } catch {
+                    // Speaker isolation improves attribution, but must never make an otherwise
+                    // transcribable call fail. Fall back to the untouched microphone track.
+                    DebugLogger.shared.warning(
+                        "Microphone leakage suppression failed: \(error.localizedDescription)",
+                        source: "CallTrackTranscriptionService"
+                    )
+                }
+            }
+
+            let result: TranscriptionResult
+            if let isolatedLocalTrack {
+                defer { try? FileManager.default.removeItem(at: isolatedLocalTrack.url) }
+                result = try await self.transcribeTemporaryTrack(
+                    localInputURL,
+                    options: FileTranscriptionOptions(
+                        // The diarizer is used only to obtain timestamped speech turns here.
+                        // Identity comes from the microphone source itself, never clustering.
+                        speakerLabelsEnabled: true,
+                        expectedSpeakerCount: 1
+                    )
+                )
+                notices.append(
+                    "Local attribution excludes periods where remote speech was active, preventing speaker playback from being mislabeled as You."
+                )
+            } else {
+                result = try await self.transcribeTemporaryTrack(
+                    localInputURL,
+                    options: FileTranscriptionOptions(
+                        speakerLabelsEnabled: true,
+                        expectedSpeakerCount: 1
+                    )
+                )
+            }
+
+            trackResults.append(result)
+            segments += Self.localSegments(from: result, shift: shift)
+            gaps += Self.shiftedGaps(result.speakerLabelingGaps, by: shift)
+            if let notice = result.speakerLabelingNotice {
+                notices.append("Local track: \(notice)")
+            }
         }
 
         segments.sort {
