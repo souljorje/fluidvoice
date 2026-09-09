@@ -35,7 +35,7 @@ private struct CapturedAudioTrack: Sendable {
 }
 
 /// Captures system audio and the selected microphone independently, aligns them, and emits one
-/// mixed call recording. The per-source CAF files are temporary implementation details.
+/// mixed call recording. Per-source files exist only long enough to build the mixed result.
 final class CallCaptureSession: @unchecked Sendable {
     private let microphoneDevice: AudioDevice.Device
     private var systemTap: CallSystemAudioTap?
