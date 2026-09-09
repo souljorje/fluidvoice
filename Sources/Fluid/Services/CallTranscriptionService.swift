@@ -59,8 +59,7 @@ final class CallTranscriptionService: ObservableObject {
             throw CallTranscriptionError.notRecording
         }
 
-        self.durationTask?.cancel()
-        self.durationTask = nil
+        self.stopDurationUpdates()
         self.isRecording = false
         self.status = "Finalizing call audio..."
         self.captureSession = nil
@@ -88,8 +87,7 @@ final class CallTranscriptionService: ObservableObject {
     }
 
     func stopForTermination() async {
-        self.durationTask?.cancel()
-        self.durationTask = nil
+        self.stopDurationUpdates()
         guard let session = self.captureSession else { return }
         self.captureSession = nil
         self.isRecording = false
@@ -105,5 +103,11 @@ final class CallTranscriptionService: ObservableObject {
                 self.elapsedSeconds = Date().timeIntervalSince(startedAt)
             }
         }
+    }
+
+    private func stopDurationUpdates() {
+        self.durationTask?.cancel()
+        self.durationTask = nil
+        self.startedAt = nil
     }
 }
