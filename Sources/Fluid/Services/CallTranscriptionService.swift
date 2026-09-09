@@ -7,8 +7,6 @@ final class CallTranscriptionService: ObservableObject {
     @Published private(set) var isTranscribing = false
     @Published private(set) var elapsedSeconds: TimeInterval = 0
     @Published private(set) var status = ""
-    @Published private(set) var lastResult: TranscriptionResult?
-    @Published private(set) var lastRecordingDirectory: URL?
 
     private let asrService: ASRService
     private var captureSession: CallCaptureSession?
@@ -43,9 +41,8 @@ final class CallTranscriptionService: ObservableObject {
         self.status = "Starting call capture..."
         let session = CallCaptureSession(microphoneDevice: microphone)
         do {
-            let directory = try await session.start()
+            try await session.start()
             self.captureSession = session
-            self.lastRecordingDirectory = directory
             self.startedAt = Date()
             self.elapsedSeconds = 0
             self.isRecording = true
@@ -57,8 +54,7 @@ final class CallTranscriptionService: ObservableObject {
         }
     }
 
-    @discardableResult
-    func stopAndTranscribe() async throws -> TranscriptionResult {
+    func stopAndTranscribe() async throws {
         guard let session = self.captureSession, self.isRecording else {
             throw CallTranscriptionError.notRecording
         }
@@ -69,10 +65,9 @@ final class CallTranscriptionService: ObservableObject {
         self.status = "Finalizing call audio..."
         self.captureSession = nil
 
-        let recording: CallRecording
+        let audioURL: URL
         do {
-            recording = try await session.stop()
-            self.lastRecordingDirectory = recording.directoryURL
+            audioURL = try await session.stop()
         } catch {
             self.status = "Call capture failed"
             throw error
@@ -83,11 +78,9 @@ final class CallTranscriptionService: ObservableObject {
 
         do {
             self.status = "Transcribing call..."
-            let result = try await MeetingTranscriptionService(asrService: self.asrService)
-                .transcribeFile(recording.audioURL, options: .call)
-            self.lastResult = result
+            _ = try await MeetingTranscriptionService(asrService: self.asrService)
+                .transcribeFile(audioURL, options: .call)
             self.status = "Call transcript complete"
-            return result
         } catch {
             self.status = "Call transcription failed"
             throw error
