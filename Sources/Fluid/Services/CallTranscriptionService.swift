@@ -4,7 +4,7 @@ import Foundation
 @MainActor
 final class CallTranscriptionService: ObservableObject {
     @Published private(set) var isRecording = false
-    @Published private(set) var isBusy = false
+    @Published private(set) var isTranscribing = false
     @Published private(set) var elapsedSeconds: TimeInterval = 0
     @Published private(set) var status = ""
 
@@ -29,7 +29,7 @@ final class CallTranscriptionService: ObservableObject {
     }
 
     func start() async throws {
-        guard !self.isRecording, !self.isBusy else { return }
+        guard !self.isRecording, !self.isTranscribing else { return }
         guard let microphone = AppServices.shared
             .microphonePreferenceCoordinator
             .inputDeviceForCapture()
@@ -38,8 +38,9 @@ final class CallTranscriptionService: ObservableObject {
             throw CallTranscriptionError.microphoneUnavailable
         }
 
-        self.isBusy = true
-        defer { self.isBusy = false }
+        // Reserve the call pipeline before the first suspension so startup cannot be reentered.
+        self.isTranscribing = true
+        defer { self.isTranscribing = false }
         self.status = "Starting call capture..."
 
         let session = CallCaptureSession(microphoneDevice: microphone)
@@ -58,14 +59,15 @@ final class CallTranscriptionService: ObservableObject {
     }
 
     func stopAndTranscribe() async throws {
-        guard let session = self.captureSession, self.isRecording, !self.isBusy else {
+        guard let session = self.captureSession, self.isRecording, !self.isTranscribing else {
             throw CallTranscriptionError.notRecording
         }
 
         self.stopDurationUpdates()
         self.isRecording = false
-        self.isBusy = true
-        defer { self.isBusy = false }
+        // Keep the pipeline reserved while capture finalizes and while transcription runs.
+        self.isTranscribing = true
+        defer { self.isTranscribing = false }
         self.captureSession = nil
         self.status = "Finalizing call audio..."
 
@@ -93,8 +95,8 @@ final class CallTranscriptionService: ObservableObject {
         guard let session = self.captureSession else { return }
         self.captureSession = nil
         self.isRecording = false
-        self.isBusy = true
-        defer { self.isBusy = false }
+        self.isTranscribing = true
+        defer { self.isTranscribing = false }
         _ = try? await session.stop()
     }
 
