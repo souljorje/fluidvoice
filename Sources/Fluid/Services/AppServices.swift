@@ -85,6 +85,9 @@ final class AppServices: ObservableObject {
         }
         let service = CallTranscriptionService(asrService: self.asr)
         self._callTranscription = service
+        self._callRecordingIndicator = CallRecordingIndicatorController(
+            callTranscriptionService: service
+        )
         return service
     }
 
