@@ -47,12 +47,9 @@ private struct CapturedAudioTrack: Sendable {
     let hasSignal: Bool
 }
 
-/// Captures the two sides of a call independently:
-/// - system audio through a Core Audio process tap
-/// - the user's selected FluidVoice microphone through the existing direct Core Audio pipeline
-///
-/// Keeping the sources separate gives transcription a reliable "You" track and avoids asking
-/// ScreenCaptureKit for display access when the feature only needs audio.
+/// Captures system audio and the selected microphone independently so they can be aligned into a
+/// single call recording without requesting screen access. Transcription runs once on the mixed
+/// recording; the source tracks are kept only as capture artifacts.
 final class CallCaptureSession: @unchecked Sendable {
     private let microphoneDevice: AudioDevice.Device
     private var systemTap: CallSystemAudioTap?
