@@ -61,8 +61,8 @@ final class CallTranscriptionService: ObservableObject {
 
         self.stopDurationUpdates()
         self.isRecording = false
-        self.status = "Finalizing call audio..."
         self.captureSession = nil
+        self.status = "Finalizing call audio..."
 
         let audioURL: URL
         do {
@@ -75,8 +75,8 @@ final class CallTranscriptionService: ObservableObject {
         self.isTranscribing = true
         defer { self.isTranscribing = false }
 
+        self.status = "Transcribing call..."
         do {
-            self.status = "Transcribing call..."
             _ = try await MeetingTranscriptionService(asrService: self.asrService)
                 .transcribeFile(audioURL, options: .call)
             self.status = "Call transcript complete"
