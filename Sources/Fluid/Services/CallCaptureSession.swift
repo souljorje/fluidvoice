@@ -6,11 +6,6 @@ import Foundation
 struct CallRecording: Sendable {
     let directoryURL: URL
     let audioURL: URL
-    let systemAudioURL: URL?
-    let microphoneAudioURL: URL?
-    let systemStartOffsetSeconds: Double?
-    let microphoneStartOffsetSeconds: Double?
-    let systemAudioHasSignal: Bool
     let startedAt: Date
     let duration: TimeInterval
 }
@@ -44,7 +39,6 @@ enum CallTranscriptionError: LocalizedError {
 private struct CapturedAudioTrack: Sendable {
     let url: URL
     let startOffsetSeconds: Double
-    let hasSignal: Bool
 }
 
 /// Captures system audio and the selected microphone independently so they can be aligned into a
@@ -193,11 +187,6 @@ final class CallCaptureSession: @unchecked Sendable {
         let recording = CallRecording(
             directoryURL: directory,
             audioURL: audioURL,
-            systemAudioURL: exportedSystemTrack?.url,
-            microphoneAudioURL: exportedMicrophoneTrack?.url,
-            systemStartOffsetSeconds: exportedSystemTrack?.startOffsetSeconds,
-            microphoneStartOffsetSeconds: exportedMicrophoneTrack?.startOffsetSeconds,
-            systemAudioHasSignal: exportedSystemTrack?.hasSignal ?? false,
             startedAt: startedAt,
             duration: duration
         )
@@ -285,8 +274,7 @@ final class CallCaptureSession: @unchecked Sendable {
         try? FileManager.default.removeItem(at: track.url)
         return CapturedAudioTrack(
             url: outputURL,
-            startOffsetSeconds: track.startOffsetSeconds,
-            hasSignal: track.hasSignal
+            startOffsetSeconds: track.startOffsetSeconds
         )
     }
 
@@ -446,7 +434,6 @@ private final class CallSystemAudioTap: @unchecked Sendable {
 /// is already off Core Audio's IO thread, so encoding/file IO here cannot block the realtime path.
 private final class CallPCMTrackWriter: @unchecked Sendable {
     private static let maximumFramesPerPacket: AVAudioFrameCount = 8192
-    private static let signalThreshold: Float = 0.000_01
 
     private let url: URL
     private let captureStartedHostTime: UInt64
@@ -456,7 +443,6 @@ private final class CallPCMTrackWriter: @unchecked Sendable {
     private var reusableBuffer: AVAudioPCMBuffer?
     private var firstHostTime: UInt64?
     private var hasWrittenAudio = false
-    private var peakMagnitude: Float = 0
     private var storedError: Error?
 
     init(url: URL, captureStartedHostTime: UInt64) {
@@ -495,9 +481,6 @@ private final class CallPCMTrackWriter: @unchecked Sendable {
 
         buffer.frameLength = AVAudioFrameCount(frameCount)
         channel.update(from: samples, count: frameCount)
-        for index in 0..<frameCount {
-            self.peakMagnitude = max(self.peakMagnitude, abs(samples[index]))
-        }
         try audioFile.write(from: buffer)
         self.hasWrittenAudio = true
     }
@@ -533,8 +516,7 @@ private final class CallPCMTrackWriter: @unchecked Sendable {
         let offset = Double(AudioConvertHostTimeToNanos(delta)) / 1_000_000_000
         return CapturedAudioTrack(
             url: self.url,
-            startOffsetSeconds: offset.isFinite ? max(0, offset) : 0,
-            hasSignal: self.peakMagnitude >= Self.signalThreshold
+            startOffsetSeconds: offset.isFinite ? max(0, offset) : 0
         )
     }
 
@@ -548,7 +530,7 @@ private final class CallPCMTrackWriter: @unchecked Sendable {
         ),
             let buffer = AVAudioPCMBuffer(
                 pcmFormat: format,
-                frameCapacity: Self.maximumFramesPerPacket
+                frameCapacity: 8192
             )
         else {
             throw CallTranscriptionError.audioWriterFailed("Could not create the PCM format.")
