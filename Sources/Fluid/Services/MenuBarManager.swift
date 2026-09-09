@@ -616,8 +616,8 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
         NSLayoutConstraint.activate([
             dot.widthAnchor.constraint(equalToConstant: 5),
             dot.heightAnchor.constraint(equalToConstant: 5),
-            dot.trailingAnchor.constraint(equalTo: button.trailingAnchor, constant: -1),
-            dot.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+            dot.trailingAnchor.constraint(equalTo: button.trailingAnchor, constant: -3),
+            dot.centerYAnchor.constraint(equalTo: button.centerYAnchor, constant: 6),
         ])
         self.callRecordingDotView = dot
     }
