@@ -102,7 +102,7 @@ final class CallTrackTranscriptionService {
                 result = try await self.transcribeTemporaryTrack(
                     localInputURL,
                     options: FileTranscriptionOptions(
-                        // The diarizer is used only to obtain timestamped speech turns here.
+                        // One-speaker diarization is used only to obtain timestamped speech turns.
                         // Identity comes from the microphone source itself, never clustering.
                         speakerLabelsEnabled: true,
                         expectedSpeakerCount: 1
