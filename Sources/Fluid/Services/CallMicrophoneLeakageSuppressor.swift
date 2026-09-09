@@ -33,7 +33,7 @@ nonisolated enum CallMicrophoneLeakageSuppressor {
         )
         guard !ranges.isEmpty else { return nil }
 
-        let outputURL = outputDirectory.appendingPathComponent("microphone-local-only.caf")
+        let outputURL = outputDirectory.appendingPathComponent("microphone-local-only.wav")
         return try await Task.detached(priority: .userInitiated) {
             try self.writeMutedCopy(
                 inputURL: microphoneURL,
