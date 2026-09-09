@@ -15,6 +15,7 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
     private var menu: NSMenu?
     private var isSetup: Bool = false
     private var hostedWindow: NSWindow?
+    private var callRecordingDotView: NSView?
 
     // Cached menu items to avoid rebuilding entire menu
     private var statusMenuItem: NSMenuItem?
@@ -185,7 +186,9 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
         )
         .receive(on: RunLoop.main)
         .sink { [weak self] _, _, _, _ in
-            self?.updateMenuItemsText()
+            guard let self else { return }
+            self.updateMenuBarIcon()
+            self.updateMenuItemsText()
         }
         .store(in: &self.cancellables)
     }
@@ -285,7 +288,7 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
 
             // If expanded command output is showing, don't hide it - let it stay visible
             if NotchOverlayManager.shared.isCommandOutputExpanded {
-                // Stop recording visualization in expanded notch
+                // Stop recording visualization in the expanded notch
                 NotchContentState.shared.setRecordingInExpandedMode(false)
                 self.expandedModeAudioSubscription?.cancel()
                 self.expandedModeAudioSubscription = nil
@@ -581,13 +584,42 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
     }
 
     private func updateMenuBarIcon() {
-        guard let statusItem = statusItem else { return }
+        guard let statusItem, let button = statusItem.button else { return }
 
-        // Use MenuBarIcon asset - vectorized from logo
+        // Use MenuBarIcon asset - vectorized from logo.
         if let image = NSImage(named: "MenuBarIcon") {
-            image.isTemplate = true // Adapts to light/dark mode and tints red when recording
-            statusItem.button?.image = image
+            image.isTemplate = true
+            button.image = image
         }
+
+        self.updateCallRecordingBadge(on: button)
+    }
+
+    private func updateCallRecordingBadge(on button: NSStatusBarButton) {
+        let isCallRecording = self.callTranscriptionService?.isRecording ?? false
+
+        guard isCallRecording else {
+            self.callRecordingDotView?.removeFromSuperview()
+            self.callRecordingDotView = nil
+            return
+        }
+        guard self.callRecordingDotView == nil else { return }
+
+        let dot = NSView()
+        dot.translatesAutoresizingMaskIntoConstraints = false
+        dot.wantsLayer = true
+        dot.layer?.backgroundColor = NSColor.systemRed.cgColor
+        dot.layer?.cornerRadius = 2.5
+        dot.toolTip = "FluidVoice is recording a call"
+        button.addSubview(dot)
+
+        NSLayoutConstraint.activate([
+            dot.widthAnchor.constraint(equalToConstant: 5),
+            dot.heightAnchor.constraint(equalToConstant: 5),
+            dot.trailingAnchor.constraint(equalTo: button.trailingAnchor, constant: -1),
+            dot.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+        ])
+        self.callRecordingDotView = dot
     }
 
     private func buildMenuStructure() {
