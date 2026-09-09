@@ -3,11 +3,6 @@ import AVFoundation
 import CoreAudio
 import Foundation
 
-struct CallRecording: Sendable {
-    let directoryURL: URL
-    let audioURL: URL
-}
-
 enum CallTranscriptionError: LocalizedError {
     case noAudioCaptured
     case notRecording
@@ -39,9 +34,8 @@ private struct CapturedAudioTrack: Sendable {
     let startOffsetSeconds: Double
 }
 
-/// Captures system audio and the selected microphone independently so they can be aligned into a
-/// single call recording without requesting screen access. Transcription runs once on the mixed
-/// recording; the source tracks are kept only as capture artifacts.
+/// Captures system audio and the selected microphone independently, aligns them, and emits one
+/// mixed call recording. The per-source CAF files are temporary implementation details.
 final class CallCaptureSession: @unchecked Sendable {
     private let microphoneDevice: AudioDevice.Device
     private var systemTap: CallSystemAudioTap?
@@ -56,7 +50,7 @@ final class CallCaptureSession: @unchecked Sendable {
         self.microphoneDevice = microphoneDevice
     }
 
-    func start() async throws -> URL {
+    func start() async throws {
         let stamp = Self.recordingStamp(for: Date())
         let directory = try Self.makeRecordingDirectory(stamp: stamp)
         let systemPCMURL = directory.appendingPathComponent("system.caf")
@@ -130,8 +124,6 @@ final class CallCaptureSession: @unchecked Sendable {
                 deviceName: self.microphoneDevice.name,
                 reason: "call_recording"
             )
-
-            return directory
         } catch {
             await self.stopCaptureInfrastructure(reason: "call_start_failed")
             self.resetCaptureState()
@@ -140,7 +132,7 @@ final class CallCaptureSession: @unchecked Sendable {
         }
     }
 
-    func stop() async throws -> CallRecording {
+    func stop() async throws -> URL {
         guard let directory = self.directoryURL,
               let stamp = self.recordingStamp
         else {
@@ -148,39 +140,35 @@ final class CallCaptureSession: @unchecked Sendable {
         }
 
         await self.stopCaptureInfrastructure(reason: "call_stop")
+        defer { self.resetCaptureState() }
 
-        let systemTrack = try self.systemWriter?.finish()
-        let microphoneTrack = try self.microphoneWriter?.finish()
-        self.systemWriter = nil
-        self.microphoneWriter = nil
+        do {
+            let tracks = try [
+                self.systemWriter?.finish(),
+                self.microphoneWriter?.finish(),
+            ].compactMap { $0 }
+            self.systemWriter = nil
+            self.microphoneWriter = nil
 
-        let exportedSystemTrack = try await Self.exportTrack(
-            systemTrack,
-            to: directory.appendingPathComponent("system.m4a")
-        )
-        let exportedMicrophoneTrack = try await Self.exportTrack(
-            microphoneTrack,
-            to: directory.appendingPathComponent("microphone.m4a")
-        )
+            guard !tracks.isEmpty else {
+                throw CallTranscriptionError.noAudioCaptured
+            }
 
-        let tracks = [exportedSystemTrack, exportedMicrophoneTrack].compactMap { $0 }
-        guard !tracks.isEmpty else {
-            self.resetCaptureState()
-            throw CallTranscriptionError.noAudioCaptured
+            defer {
+                for track in tracks {
+                    try? FileManager.default.removeItem(at: track.url)
+                }
+            }
+
+            let outputURL = directory.appendingPathComponent("call-\(stamp).m4a")
+            return try await CallAudioMixer.makeMixedRecording(
+                outputURL: outputURL,
+                tracks: tracks
+            )
+        } catch {
+            try? FileManager.default.removeItem(at: directory)
+            throw error
         }
-
-        let outputURL = directory.appendingPathComponent("call-\(stamp).m4a")
-        let audioURL = try await CallAudioMixer.makeMixedRecording(
-            outputURL: outputURL,
-            tracks: tracks
-        )
-
-        let recording = CallRecording(
-            directoryURL: directory,
-            audioURL: audioURL
-        )
-        self.resetCaptureState()
-        return recording
     }
 
     private func stopCaptureInfrastructure(reason: String) async {
@@ -229,40 +217,6 @@ final class CallCaptureSession: @unchecked Sendable {
         let directory = root.appendingPathComponent("\(stamp)-\(suffix)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
-    }
-
-    private static func exportTrack(
-        _ track: CapturedAudioTrack?,
-        to outputURL: URL
-    ) async throws -> CapturedAudioTrack? {
-        guard let track else { return nil }
-        try? FileManager.default.removeItem(at: outputURL)
-
-        let asset = AVURLAsset(url: track.url)
-        guard let exporter = AVAssetExportSession(
-            asset: asset,
-            presetName: AVAssetExportPresetAppleM4A
-        ) else {
-            throw CallTranscriptionError.audioWriterFailed("Could not create the audio exporter.")
-        }
-        exporter.outputURL = outputURL
-        exporter.outputFileType = .m4a
-
-        await withCheckedContinuation { continuation in
-            exporter.exportAsynchronously {
-                continuation.resume()
-            }
-        }
-        guard exporter.status == .completed else {
-            throw CallTranscriptionError.audioWriterFailed(
-                exporter.error?.localizedDescription ?? "Audio export did not complete."
-            )
-        }
-        try? FileManager.default.removeItem(at: track.url)
-        return CapturedAudioTrack(
-            url: outputURL,
-            startOffsetSeconds: track.startOffsetSeconds
-        )
     }
 }
 
@@ -419,7 +373,6 @@ private final class CallPCMTrackWriter: @unchecked Sendable {
     private let captureStartedHostTime: UInt64
     private let lock = NSLock()
     private var audioFile: AVAudioFile?
-    private var audioFormat: AVAudioFormat?
     private var reusableBuffer: AVAudioPCMBuffer?
     private var firstHostTime: UInt64?
     private var hasWrittenAudio = false
@@ -487,7 +440,6 @@ private final class CallPCMTrackWriter: @unchecked Sendable {
         }
 
         self.audioFile = nil
-        self.audioFormat = nil
         self.reusableBuffer = nil
 
         let delta = firstHostTime >= self.captureStartedHostTime
@@ -522,7 +474,6 @@ private final class CallPCMTrackWriter: @unchecked Sendable {
             commonFormat: .pcmFormatFloat32,
             interleaved: false
         )
-        self.audioFormat = format
         self.reusableBuffer = buffer
     }
 }
