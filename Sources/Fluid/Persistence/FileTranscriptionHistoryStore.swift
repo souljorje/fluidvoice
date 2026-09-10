@@ -10,6 +10,11 @@ import Foundation
 
 // MARK: - File Transcription Entry Model
 
+nonisolated enum FileTranscriptionKind: String, Codable, Equatable, Sendable {
+    case file
+    case call
+}
+
 nonisolated struct FileTranscriptionEntry: Codable, Identifiable, Equatable {
     let id: UUID
     let timestamp: Date
