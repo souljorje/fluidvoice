@@ -32,13 +32,8 @@ enum CallTranscriptionError: LocalizedError {
     }
 }
 
-protocol CallCaptureSessionProtocol: AnyObject, Sendable {
-    func start() async throws
-    func stop() async throws -> CapturedCallAudio
-}
-
 /// Captures system audio and the selected microphone as aligned temporary source tracks.
-final class CallCaptureSession: CallCaptureSessionProtocol, @unchecked Sendable {
+final class CallCaptureSession: @unchecked Sendable {
     private static let activeDirectoriesLock = NSLock()
     private static var activeDirectories: Set<URL> = []
 

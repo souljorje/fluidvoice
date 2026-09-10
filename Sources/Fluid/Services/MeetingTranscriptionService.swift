@@ -331,8 +331,7 @@ nonisolated struct TranscriptionResult: Identifiable, Sendable, Codable {
 struct FileTranscriptionOptions: Sendable, Equatable {
     let speakerLabelsEnabled: Bool
     let expectedSpeakerCount: Int?
-    let recordsUsage: Bool
-    let savesToHistory: Bool
+    let isSourceTrack: Bool
 
     @MainActor
     static var userSettings: Self {
@@ -341,8 +340,7 @@ struct FileTranscriptionOptions: Sendable, Equatable {
         return Self(
             speakerLabelsEnabled: settings.fileTranscriptionSpeakerLabelsEnabled,
             expectedSpeakerCount: expectedSpeakerCount > 0 ? expectedSpeakerCount : nil,
-            recordsUsage: true,
-            savesToHistory: true
+            isSourceTrack: false
         )
     }
 
@@ -350,8 +348,7 @@ struct FileTranscriptionOptions: Sendable, Equatable {
         Self(
             speakerLabelsEnabled: true,
             expectedSpeakerCount: expectedSpeakerCount,
-            recordsUsage: false,
-            savesToHistory: false
+            isSourceTrack: true
         )
     }
 }
@@ -474,7 +471,7 @@ final class MeetingTranscriptionService: ObservableObject {
                     .fileNotSupported("Format .\(fileExtension) not supported. \(Self.supportedFormatsDescription)")
             }
 
-            if options.recordsUsage {
+            if !options.isSourceTrack {
                 AnalyticsService.shared.recordUsage(
                     mode: .meeting,
                     transcriptionModel: SettingsStore.shared.selectedSpeechModel.analyticsDescriptor
@@ -511,7 +508,7 @@ final class MeetingTranscriptionService: ObservableObject {
                     duration: duration,
                     startTime: startTime,
                     expectedSpeakerCount: options.expectedSpeakerCount,
-                    savesToHistory: options.savesToHistory
+                    isSourceTrack: options.isSourceTrack
                 ) {
                     return labeledResult
                 }
@@ -553,7 +550,7 @@ final class MeetingTranscriptionService: ObservableObject {
                 self.progress = 1.0
 
                 self.result = result
-                if options.savesToHistory {
+                if !options.isSourceTrack {
                     FileTranscriptionHistoryStore.shared.addEntry(result)
                 }
                 return result
@@ -677,7 +674,7 @@ final class MeetingTranscriptionService: ObservableObject {
             )
 
             self.result = result
-            if options.savesToHistory {
+            if !options.isSourceTrack {
                 FileTranscriptionHistoryStore.shared.addEntry(result)
             }
             return result
@@ -728,7 +725,7 @@ final class MeetingTranscriptionService: ObservableObject {
         duration: Double,
         startTime: Date,
         expectedSpeakerCount: Int?,
-        savesToHistory: Bool
+        isSourceTrack: Bool
     ) async -> TranscriptionResult? {
         self.currentStatus = "Identifying speakers..."
         self.progress = 0.25
@@ -833,7 +830,7 @@ final class MeetingTranscriptionService: ObservableObject {
         self.progress = 1.0
 
         self.result = result
-        if savesToHistory {
+        if !isSourceTrack {
             FileTranscriptionHistoryStore.shared.addEntry(result)
         }
         return result

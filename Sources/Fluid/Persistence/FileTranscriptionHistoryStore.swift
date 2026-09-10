@@ -84,8 +84,7 @@ nonisolated struct FileTranscriptionEntry: Codable, Identifiable, Equatable {
         self.timestamp = try c.decode(Date.self, forKey: .timestamp)
         self.fileName = try c.decode(String.self, forKey: .fileName)
         self.sourceFilePath = try c.decodeIfPresent(String.self, forKey: .sourceFilePath)
-        self.kind = try c.decodeIfPresent(FileTranscriptionKind.self, forKey: .kind)
-            ?? (self.fileName.hasPrefix("call-") ? .call : .file)
+        self.kind = try c.decodeIfPresent(FileTranscriptionKind.self, forKey: .kind) ?? .file
         self.duration = try c.decode(TimeInterval.self, forKey: .duration)
         self.processingTime = try c.decode(TimeInterval.self, forKey: .processingTime)
         self.confidence = try c.decode(Float.self, forKey: .confidence)

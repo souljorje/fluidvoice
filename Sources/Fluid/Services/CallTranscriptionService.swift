@@ -3,41 +3,28 @@ import Foundation
 
 @MainActor
 final class CallTranscriptionService: ObservableObject {
-    typealias CaptureSessionFactory = @MainActor (AudioDevice.Device) -> any CallCaptureSessionProtocol
-    typealias MicrophoneProvider = @MainActor () -> AudioDevice.Device?
-
     @Published private(set) var isRecording = false
     @Published private(set) var isTranscribing = false
     @Published private(set) var elapsedSeconds: TimeInterval = 0
     @Published private(set) var status = ""
-    @Published private(set) var lastResult: TranscriptionResult?
 
     private let asrService: ASRService
     private let fileTranscriptionService: MeetingTranscriptionService
     private let audioCaptureCoordinator: AudioCaptureCoordinator
-    private let captureSessionFactory: CaptureSessionFactory
-    private let microphoneProvider: MicrophoneProvider
-    private var captureSession: (any CallCaptureSessionProtocol)?
+    private var captureSession: CallCaptureSession?
     private var startedAt: Date?
     private var durationTask: Task<Void, Never>?
     private var pipelineWaiters: [CheckedContinuation<Void, Never>] = []
+    private var isWaitingForDictation = false
+    private var isTerminating = false
 
     init(
         asrService: ASRService,
-        audioCaptureCoordinator: AudioCaptureCoordinator = .shared,
-        captureSessionFactory: @escaping CaptureSessionFactory = { CallCaptureSession(microphoneDevice: $0) },
-        microphoneProvider: @escaping MicrophoneProvider = {
-            AppServices.shared.microphonePreferenceCoordinator.inputDeviceForCapture()
-        }
+        audioCaptureCoordinator: AudioCaptureCoordinator = .shared
     ) {
         self.asrService = asrService
         self.fileTranscriptionService = MeetingTranscriptionService(asrService: asrService)
         self.audioCaptureCoordinator = audioCaptureCoordinator
-        self.captureSessionFactory = captureSessionFactory
-        self.microphoneProvider = microphoneProvider
-        self.lastResult = FileTranscriptionHistoryStore.shared.entries
-            .first(where: { $0.kind == .call })?
-            .toTranscriptionResult()
     }
 
     var elapsedText: String {
@@ -53,7 +40,7 @@ final class CallTranscriptionService: ObservableObject {
 
     func start() async throws {
         guard !self.isRecording, !self.isTranscribing else { return }
-        guard let microphone = self.microphoneProvider() else {
+        guard let microphone = AppServices.shared.microphonePreferenceCoordinator.inputDeviceForCapture() else {
             self.status = "Call capture failed"
             throw CallTranscriptionError.microphoneUnavailable
         }
@@ -71,12 +58,13 @@ final class CallTranscriptionService: ObservableObject {
         defer { self.finishPipelineActivity() }
         self.status = "Starting call capture..."
 
-        let session = self.captureSessionFactory(microphone)
+        let session = CallCaptureSession(microphoneDevice: microphone)
         do {
             try await session.start()
             self.captureSession = session
             self.startedAt = Date()
             self.elapsedSeconds = 0
+            self.audioCaptureCoordinator.setCallRecording(true)
             self.isRecording = true
             self.status = "Recording call"
             self.startDurationUpdates()
@@ -93,6 +81,7 @@ final class CallTranscriptionService: ObservableObject {
         }
 
         self.stopDurationUpdates()
+        self.audioCaptureCoordinator.setCallRecording(false)
         self.isRecording = false
         self.isTranscribing = true
         defer {
@@ -111,6 +100,14 @@ final class CallTranscriptionService: ObservableObject {
         }
         defer { capturedAudio.remove() }
 
+        if self.asrService.isRunningOrStarting {
+            self.status = "Waiting for dictation to finish..."
+        }
+        self.isWaitingForDictation = true
+        await self.audioCaptureCoordinator.waitUntilReleased(.dictation)
+        self.isWaitingForDictation = false
+        guard !self.isTerminating else { return }
+
         self.status = "Transcribing call..."
         AnalyticsService.shared.recordUsage(
             mode: .meeting,
@@ -118,7 +115,6 @@ final class CallTranscriptionService: ObservableObject {
         )
         do {
             let result = try await self.transcribe(capturedAudio)
-            self.lastResult = result
             FileTranscriptionHistoryStore.shared.addEntry(result)
             self.status = "Call transcript complete"
         } catch {
@@ -128,7 +124,12 @@ final class CallTranscriptionService: ObservableObject {
     }
 
     func stopForTermination() async {
+        self.isTerminating = true
         self.stopDurationUpdates()
+        self.audioCaptureCoordinator.setCallRecording(false)
+
+        // ASR shutdown releases an active dictation and lets the pending call task unwind.
+        guard !self.isWaitingForDictation else { return }
 
         while self.isTranscribing, self.captureSession == nil {
             await self.waitForPipelineActivity()
