@@ -5,6 +5,7 @@ import SwiftUI
 
 enum MenuBarNavigationDestination: String {
     case customDictionary
+    case meetingTools
     case microphoneSettings
     case settings
 }
@@ -21,6 +22,7 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
     private var statusMenuItem: NSMenuItem?
     private var copyLastTranscriptMenuItem: NSMenuItem?
     private var callTranscriptionMenuItem: NSMenuItem?
+    private var viewLastCallTranscriptMenuItem: NSMenuItem?
     private var rollbackMenuItem: NSMenuItem?
     private var microphoneMenuItem: NSMenuItem?
     private var microphoneSubmenu: NSMenu?
@@ -642,6 +644,8 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
         menu.addItem(copyLastTranscriptItem)
         self.copyLastTranscriptMenuItem = copyLastTranscriptItem
 
+        menu.addItem(.separator())
+
         let callTranscriptionItem = NSMenuItem(
             title: "Record Call",
             action: #selector(toggleCallTranscription(_:)),
@@ -650,6 +654,15 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
         callTranscriptionItem.target = self
         menu.addItem(callTranscriptionItem)
         self.callTranscriptionMenuItem = callTranscriptionItem
+
+        let viewLastCallTranscriptItem = NSMenuItem(
+            title: "View Last Call Transcript",
+            action: #selector(viewLastCallTranscript(_:)),
+            keyEquivalent: ""
+        )
+        viewLastCallTranscriptItem.target = self
+        menu.addItem(viewLastCallTranscriptItem)
+        self.viewLastCallTranscriptMenuItem = viewLastCallTranscriptItem
 
         menu.addItem(.separator())
 
@@ -738,13 +751,23 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
             self.statusMenuItem?.title = call.status.isEmpty ? "Transcribing Call..." : call.status
             self.callTranscriptionMenuItem?.title = "Transcribing Call..."
             self.callTranscriptionMenuItem?.isEnabled = false
-        } else {
-            self.statusMenuItem?.title = self.isRecording ? "Recording...\(hotkeyInfo)" : "Ready to Record\(hotkeyInfo)"
+        } else if self.isRecording {
+            self.statusMenuItem?.title = "Recording...\(hotkeyInfo)"
             self.callTranscriptionMenuItem?.title = "Record Call"
-            self.callTranscriptionMenuItem?.isEnabled = !self.isRecording && call != nil
+            self.callTranscriptionMenuItem?.isEnabled = false
+        } else {
+            let hasCompletedCall = self.latestCallTranscript != nil
+                && call?.status == "Call transcript complete"
+            self.statusMenuItem?.title = hasCompletedCall
+                ? "Call transcript complete"
+                : "Ready to Record\(hotkeyInfo)"
+            self.callTranscriptionMenuItem?.title = "Record Call"
+            self.callTranscriptionMenuItem?.isEnabled = call != nil
+                && self.asrService?.isRunningOrStarting != true
         }
 
         self.copyLastTranscriptMenuItem?.isEnabled = self.canCopyLastTranscript
+        self.viewLastCallTranscriptMenuItem?.isEnabled = self.latestCallTranscript != nil
         self.microphoneMenuItem?.isEnabled = !(call?.isRecording ?? false)
 
         // Update rollback availability text
@@ -845,6 +868,12 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
         !self.isProcessingActive && TranscriptionHistoryStore.shared.latestClipboardText != nil
     }
 
+    private var latestCallTranscript: TranscriptionResult? {
+        FileTranscriptionHistoryStore.shared.entries
+            .first(where: { $0.kind == .call })?
+            .toTranscriptionResult()
+    }
+
     @objc private func copyLastTranscript(_ sender: Any?) {
         guard self.canCopyLastTranscript,
               let text = TranscriptionHistoryStore.shared.latestClipboardText
@@ -855,6 +884,12 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
 
         _ = ClipboardService.copyToClipboard(text)
         DebugLogger.shared.info("Menu action: Copied latest transcription to clipboard", source: "MenuBarManager")
+    }
+
+    @objc private func viewLastCallTranscript(_ sender: Any?) {
+        guard let result = self.latestCallTranscript else { return }
+        FileTranscriptionHistoryStore.shared.selectedEntryID = result.id
+        self.openNavigationDestination(.meetingTools)
     }
 
     @objc private func toggleCallTranscription(_ sender: Any?) {

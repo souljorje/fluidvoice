@@ -1055,6 +1055,8 @@ struct ContentView: View {
         switch destination {
         case .customDictionary:
             self.navigateToApp(.customDictionary)
+        case .meetingTools:
+            self.navigateToApp(.meetingTools)
         case .microphoneSettings:
             self.openSettings(.audio)
         case .settings:
@@ -3922,6 +3924,13 @@ struct ContentView: View {
             DebugLogger.shared.debug("ContentView: start ignored because capture is already active", source: "ContentView")
             return
         }
+        guard AudioCaptureCoordinator.shared.owner != .call else {
+            DebugLogger.shared.debug(
+                "ContentView: start ignored because call capture is active",
+                source: "ContentView"
+            )
+            return
+        }
 
         self.advanceOverlayLifecycle()
         self.setActiveRecordingMode(.dictate)
@@ -4193,6 +4202,7 @@ struct ContentView: View {
             },
             commandModeCallback: {
                 DebugLogger.shared.info("Command mode triggered", source: "ContentView")
+                guard AudioCaptureCoordinator.shared.owner != .call else { return }
                 self.captureRecordingContext()
 
                 // Set flag so stopAndProcessTranscription knows to process as command
@@ -4223,6 +4233,7 @@ struct ContentView: View {
                 }
             },
             rewriteModeCallback: {
+                guard AudioCaptureCoordinator.shared.owner != .call else { return }
                 self.captureRecordingContext()
 
                 // Try to capture text first while still in the other app
@@ -4582,6 +4593,10 @@ extension ContentView {
     ) {
         DebugLogger.shared.debug("Begin dictation recording for slot \(slot.rawValue)", source: "ContentView")
         self.appBench("begin_recording slot=\(slot.rawValue) mode=\(mode.rawValue)")
+        guard AudioCaptureCoordinator.shared.owner != .call else {
+            self.appBench("asr_start_skipped reason=call_capture_active")
+            return
+        }
         if self.isOnboardingVoicePlaygroundStepActive {
             self.asr.finalText = ""
             self.settings.onboardingPlaygroundValidated = false

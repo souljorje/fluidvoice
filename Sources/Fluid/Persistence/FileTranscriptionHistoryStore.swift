@@ -14,6 +14,8 @@ nonisolated struct FileTranscriptionEntry: Codable, Identifiable, Equatable {
     let id: UUID
     let timestamp: Date
     let fileName: String
+    let sourceFilePath: String?
+    let kind: FileTranscriptionKind
     let duration: TimeInterval
     let processingTime: TimeInterval
     let confidence: Float
@@ -27,6 +29,8 @@ nonisolated struct FileTranscriptionEntry: Codable, Identifiable, Equatable {
         id: UUID = UUID(),
         timestamp: Date = Date(),
         fileName: String,
+        sourceFilePath: String? = nil,
+        kind: FileTranscriptionKind = .file,
         duration: TimeInterval,
         processingTime: TimeInterval,
         confidence: Float,
@@ -38,6 +42,8 @@ nonisolated struct FileTranscriptionEntry: Codable, Identifiable, Equatable {
         self.id = id
         self.timestamp = timestamp
         self.fileName = fileName
+        self.sourceFilePath = sourceFilePath
+        self.kind = kind
         self.duration = duration
         self.processingTime = processingTime
         self.confidence = confidence
@@ -51,6 +57,8 @@ nonisolated struct FileTranscriptionEntry: Codable, Identifiable, Equatable {
         self.id = result.id
         self.timestamp = result.timestamp
         self.fileName = result.fileName
+        self.sourceFilePath = result.sourceFilePath
+        self.kind = result.kind
         self.duration = result.duration
         self.processingTime = result.processingTime
         self.confidence = result.confidence
@@ -61,7 +69,7 @@ nonisolated struct FileTranscriptionEntry: Codable, Identifiable, Equatable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, timestamp, fileName, duration, processingTime, confidence, text, speakerSegments
+        case id, timestamp, fileName, sourceFilePath, kind, duration, processingTime, confidence, text, speakerSegments
         case speakerLabelingNotice, speakerLabelingGaps
     }
 
@@ -70,6 +78,9 @@ nonisolated struct FileTranscriptionEntry: Codable, Identifiable, Equatable {
         self.id = try c.decode(UUID.self, forKey: .id)
         self.timestamp = try c.decode(Date.self, forKey: .timestamp)
         self.fileName = try c.decode(String.self, forKey: .fileName)
+        self.sourceFilePath = try c.decodeIfPresent(String.self, forKey: .sourceFilePath)
+        self.kind = try c.decodeIfPresent(FileTranscriptionKind.self, forKey: .kind)
+            ?? (self.fileName.hasPrefix("call-") ? .call : .file)
         self.duration = try c.decode(TimeInterval.self, forKey: .duration)
         self.processingTime = try c.decode(TimeInterval.self, forKey: .processingTime)
         self.confidence = try c.decode(Float.self, forKey: .confidence)
@@ -85,6 +96,8 @@ nonisolated struct FileTranscriptionEntry: Codable, Identifiable, Equatable {
         try c.encode(self.id, forKey: .id)
         try c.encode(self.timestamp, forKey: .timestamp)
         try c.encode(self.fileName, forKey: .fileName)
+        try c.encodeIfPresent(self.sourceFilePath, forKey: .sourceFilePath)
+        try c.encode(self.kind, forKey: .kind)
         try c.encode(self.duration, forKey: .duration)
         try c.encode(self.processingTime, forKey: .processingTime)
         try c.encode(self.confidence, forKey: .confidence)
@@ -132,6 +145,8 @@ nonisolated struct FileTranscriptionEntry: Codable, Identifiable, Equatable {
             processingTime: self.processingTime,
             fileName: self.fileName,
             timestamp: self.timestamp,
+            sourceFilePath: self.sourceFilePath,
+            kind: self.kind,
             speakerSegments: self.speakerSegments,
             speakerLabelingNotice: self.speakerLabelingNotice,
             speakerLabelingGaps: self.speakerLabelingGaps
