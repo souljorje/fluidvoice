@@ -523,7 +523,7 @@ struct MeetingTranscriptionView: View {
                             Image(systemName: "folder")
                         }
                         .disabled(!FileManager.default.fileExists(atPath: sourceFileURL.path))
-                        .help("Show original file in Finder")
+                        .help("Show original file")
                     }
                     Button(action: { self.copyToClipboard(entry.text) }) {
                         Image(systemName: "doc.on.doc")

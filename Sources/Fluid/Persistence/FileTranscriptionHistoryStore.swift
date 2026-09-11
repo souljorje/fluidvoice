@@ -193,7 +193,8 @@ final class FileTranscriptionHistoryStore: ObservableObject {
         self.entries.insert(entry, at: 0)
 
         if self.entries.count > self.maxEntries {
-            self.entries.removeLast()
+            let removed = self.entries.removeLast()
+            CallRecordingStore.shared.deleteIfOwned(path: removed.sourceFilePath)
         }
 
         self.selectedEntryID = entry.id
@@ -206,7 +207,9 @@ final class FileTranscriptionHistoryStore: ObservableObject {
     }
 
     func deleteEntry(id: UUID) {
+        let removed = self.entries.first(where: { $0.id == id })
         self.entries.removeAll { $0.id == id }
+        CallRecordingStore.shared.deleteIfOwned(path: removed?.sourceFilePath)
         if self.selectedEntryID == id {
             self.selectedEntryID = self.entries.first?.id
         }
@@ -214,7 +217,11 @@ final class FileTranscriptionHistoryStore: ObservableObject {
     }
 
     func clearAll() {
+        let removedEntries = self.entries
         self.entries.removeAll()
+        for entry in removedEntries {
+            CallRecordingStore.shared.deleteIfOwned(path: entry.sourceFilePath)
+        }
         self.selectedEntryID = nil
         self.saveEntries()
         DebugLogger.shared.info("Cleared all file transcription history", source: "FileTranscriptionHistoryStore")

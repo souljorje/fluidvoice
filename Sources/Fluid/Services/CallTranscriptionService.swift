@@ -3,6 +3,12 @@ import Foundation
 
 @MainActor
 final class CallTranscriptionService: ObservableObject {
+    private struct SourceTranscription {
+        let results: [(track: CapturedAudioTrack, result: TranscriptionResult)]
+        let processingTime: TimeInterval
+        let failures: [String]
+    }
+
     @Published private(set) var isRecording = false
     @Published private(set) var isTranscribing = false
     @Published private(set) var elapsedSeconds: TimeInterval = 0
@@ -108,16 +114,33 @@ final class CallTranscriptionService: ObservableObject {
         self.isWaitingForDictation = false
         guard !self.isTerminating else { return }
 
-        self.status = "Transcribing call..."
         AnalyticsService.shared.recordUsage(
             mode: .meeting,
             transcriptionModel: SettingsStore.shared.selectedSpeechModel.analyticsDescriptor
         )
+        var recordingURL: URL?
         do {
-            let result = try await self.transcribe(capturedAudio)
+            self.status = "Saving call recording..."
+            async let savedRecording = CallRecordingStore.shared.save(capturedAudio)
+            async let transcription = self.transcribeSources(capturedAudio)
+
+            let savedRecordingURL = try await savedRecording
+            recordingURL = savedRecordingURL
+            let sourceTranscription = try await transcription
+            let result = self.assembleResult(
+                sourceTranscription.results,
+                capturedAudio: capturedAudio,
+                processingTime: sourceTranscription.processingTime,
+                sourceFilePath: savedRecordingURL.path,
+                sourceFailures: sourceTranscription.failures
+            )
+            guard !result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw CallTranscriptionError.noSpeechRecognized
+            }
             FileTranscriptionHistoryStore.shared.addEntry(result)
             self.status = "Call transcript complete"
         } catch {
+            CallRecordingStore.shared.deleteIfOwned(path: recordingURL?.path)
             self.status = "Call transcription failed"
             throw error
         }
@@ -148,7 +171,7 @@ final class CallTranscriptionService: ObservableObject {
         }
     }
 
-    private func transcribe(_ capturedAudio: CapturedCallAudio) async throws -> TranscriptionResult {
+    private func transcribeSources(_ capturedAudio: CapturedCallAudio) async throws -> SourceTranscription {
         let startedAt = Date()
         var sourceResults: [(track: CapturedAudioTrack, result: TranscriptionResult)] = []
         var sourceFailures: [String] = []
@@ -166,9 +189,9 @@ final class CallTranscriptionService: ObservableObject {
             self.status = "Transcribing \(sourceName)..."
             do {
                 let expectedSpeakerCount = track.source == .microphone ? 1 : nil
-                let result = try await self.fileTranscriptionService.transcribeFile(
+                let result = try await self.fileTranscriptionService.transcribeSourceFile(
                     track.url,
-                    options: .callSource(expectedSpeakerCount: expectedSpeakerCount)
+                    options: .callTrack(expectedSpeakerCount: expectedSpeakerCount)
                 )
                 sourceResults.append((track, result))
             } catch {
@@ -184,22 +207,18 @@ final class CallTranscriptionService: ObservableObject {
         guard !sourceResults.isEmpty else {
             throw lastError ?? CallTranscriptionError.noAudioCaptured
         }
-        let result = self.assembleResult(
-            sourceResults,
-            capturedAudio: capturedAudio,
+        return SourceTranscription(
+            results: sourceResults,
             processingTime: Date().timeIntervalSince(startedAt),
-            sourceFailures: sourceFailures
+            failures: sourceFailures
         )
-        guard !result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw CallTranscriptionError.noSpeechRecognized
-        }
-        return result
     }
 
     private func assembleResult(
         _ sourceResults: [(track: CapturedAudioTrack, result: TranscriptionResult)],
         capturedAudio: CapturedCallAudio,
         processingTime: TimeInterval,
+        sourceFilePath: String,
         sourceFailures: [String]
     ) -> TranscriptionResult {
         var segments: [SpeakerTranscriptSegment] = []
@@ -230,7 +249,7 @@ final class CallTranscriptionService: ObservableObject {
             if result.speakerSegments.isEmpty {
                 let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !text.isEmpty else { continue }
-                let speaker = sourceResult.track.source == .microphone ? "You" : "Speaker 1"
+                let speaker = sourceResult.track.source == .microphone ? "You" : "Other participant"
                 segments.append(SpeakerTranscriptSegment(
                     speaker: speaker,
                     startSeconds: offset,
@@ -276,6 +295,7 @@ final class CallTranscriptionService: ObservableObject {
             duration: duration,
             processingTime: processingTime,
             fileName: capturedAudio.fileName,
+            sourceFilePath: sourceFilePath,
             kind: .call,
             speakerSegments: segments,
             speakerLabelingNotice: notices.isEmpty ? nil : notices.joined(separator: " "),

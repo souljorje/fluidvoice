@@ -656,7 +656,7 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
         self.callTranscriptionMenuItem = callTranscriptionItem
 
         let viewLastCallTranscriptItem = NSMenuItem(
-            title: "View Last Call Transcript",
+            title: "Show Last Call Transcript",
             action: #selector(viewLastCallTranscript(_:)),
             keyEquivalent: ""
         )

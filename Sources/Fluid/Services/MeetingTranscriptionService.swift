@@ -331,7 +331,6 @@ nonisolated struct TranscriptionResult: Identifiable, Sendable, Codable {
 struct FileTranscriptionOptions: Sendable, Equatable {
     let speakerLabelsEnabled: Bool
     let expectedSpeakerCount: Int?
-    let isSourceTrack: Bool
 
     @MainActor
     static var userSettings: Self {
@@ -339,16 +338,14 @@ struct FileTranscriptionOptions: Sendable, Equatable {
         let expectedSpeakerCount = settings.fileTranscriptionExpectedSpeakerCount
         return Self(
             speakerLabelsEnabled: settings.fileTranscriptionSpeakerLabelsEnabled,
-            expectedSpeakerCount: expectedSpeakerCount > 0 ? expectedSpeakerCount : nil,
-            isSourceTrack: false
+            expectedSpeakerCount: expectedSpeakerCount > 0 ? expectedSpeakerCount : nil
         )
     }
 
-    static func callSource(expectedSpeakerCount: Int?) -> Self {
+    static func callTrack(expectedSpeakerCount: Int?) -> Self {
         Self(
             speakerLabelsEnabled: true,
-            expectedSpeakerCount: expectedSpeakerCount,
-            isSourceTrack: true
+            expectedSpeakerCount: expectedSpeakerCount
         )
     }
 }
@@ -418,19 +415,9 @@ final class MeetingTranscriptionService: ObservableObject {
 
     /// Initialize the ASR models (reuses models from ASRService - no duplicate download!)
     func initializeModels() async throws {
-        guard !self.asrService.isAsrReady else { return }
-
-        self.currentStatus = "Preparing ASR models..."
-        self.progress = 0.1
-
-        do {
-            try await self.asrService.ensureAsrReady()
-
-            self.currentStatus = "Models ready"
-            self.progress = 0.0
-        } catch {
-            throw TranscriptionError.modelLoadFailed(error.localizedDescription)
-        }
+        try await self.ensureModelsReady(publishesProgress: true)
+        self.currentStatus = "Models ready"
+        self.progress = 0.0
     }
 
     /// Transcribe an audio or video file.
@@ -441,21 +428,61 @@ final class MeetingTranscriptionService: ObservableObject {
     ) async throws -> TranscriptionResult {
         let options = requestedOptions ?? .userSettings
         self.isTranscribing = true
-        error = nil
+        self.error = nil
         self.fallbackNotice = nil
         self.progress = 0.0
-        let startTime = Date()
 
         defer {
-            isTranscribing = false
-            progress = 0.0
+            self.isTranscribing = false
+            self.progress = 0.0
         }
 
         do {
-            // Initialize models if not already done (reuses ASRService models)
-            if !self.asrService.isAsrReady {
-                try await self.initializeModels()
-            }
+            let result = try await self.performTranscription(
+                fileURL,
+                options: options,
+                publishesProgress: true
+            )
+            AnalyticsService.shared.recordUsage(
+                mode: .meeting,
+                transcriptionModel: SettingsStore.shared.selectedSpeechModel.analyticsDescriptor
+            )
+            self.result = result
+            self.fallbackNotice = result.speakerLabelingNotice
+            FileTranscriptionHistoryStore.shared.addEntry(result)
+            return result
+        } catch let error as TranscriptionError {
+            self.error = error.localizedDescription
+            throw error
+        } catch {
+            let wrappedError = TranscriptionError.transcriptionFailed(error.localizedDescription)
+            self.error = wrappedError.localizedDescription
+            throw wrappedError
+        }
+    }
+
+    /// Reusable transcription without meeting analytics, history, result, or progress state.
+    func transcribeSourceFile(
+        _ fileURL: URL,
+        options: FileTranscriptionOptions
+    ) async throws -> TranscriptionResult {
+        try await self.performTranscription(
+            fileURL,
+            options: options,
+            publishesProgress: false
+        )
+    }
+
+    private func performTranscription(
+        _ fileURL: URL,
+        options: FileTranscriptionOptions,
+        publishesProgress: Bool
+    ) async throws -> TranscriptionResult {
+        let startTime = Date()
+        var fallbackNotice: String?
+
+        do {
+            try await self.ensureModelsReady(publishesProgress: publishesProgress)
 
             // Get the current transcription provider (works for both Parakeet and Whisper)
             let provider = self.asrService.fileTranscriptionProvider
@@ -471,16 +498,12 @@ final class MeetingTranscriptionService: ObservableObject {
                     .fileNotSupported("Format .\(fileExtension) not supported. \(Self.supportedFormatsDescription)")
             }
 
-            if !options.isSourceTrack {
-                AnalyticsService.shared.recordUsage(
-                    mode: .meeting,
-                    transcriptionModel: SettingsStore.shared.selectedSpeechModel.analyticsDescriptor
-                )
-            }
-
             // Get audio duration for progress display
-            self.currentStatus = "Analyzing audio file..."
-            self.progress = 0.2
+            self.publishProgress(
+                status: "Analyzing audio file...",
+                progress: 0.2,
+                enabled: publishesProgress
+            )
 
             let asset = AVAsset(url: fileURL)
             let duration: Double
@@ -508,7 +531,7 @@ final class MeetingTranscriptionService: ObservableObject {
                     duration: duration,
                     startTime: startTime,
                     expectedSpeakerCount: options.expectedSpeakerCount,
-                    isSourceTrack: options.isSourceTrack
+                    publishesProgress: publishesProgress
                 ) {
                     return labeledResult
                 }
@@ -516,8 +539,8 @@ final class MeetingTranscriptionService: ObservableObject {
                     "Speaker labeling unavailable for this file; falling back to standard transcription",
                     source: "MeetingTranscriptionService"
                 )
-                self.fallbackNotice = "Speaker labeling was unavailable for this file. The transcript was completed without speaker labels."
-                self.progress = 0.3
+                fallbackNotice = "Speaker labeling was unavailable for this file. The transcript was completed without speaker labels."
+                self.publishProgress(progress: 0.3, enabled: publishesProgress)
             } else if options.speakerLabelsEnabled, isVideoContainer {
                 DebugLogger.shared.info(
                     "Speaker labeling skipped for video container; using standard transcription",
@@ -526,8 +549,11 @@ final class MeetingTranscriptionService: ObservableObject {
             }
 
             if provider.prefersNativeFileTranscription && !isVideoContainer {
-                self.currentStatus = duration > 0 ? "Transcribing audio (\(Int(duration))s)..." : "Transcribing audio..."
-                self.progress = 0.3
+                self.publishProgress(
+                    status: duration > 0 ? "Transcribing audio (\(Int(duration))s)..." : "Transcribing audio...",
+                    progress: 0.3,
+                    enabled: publishesProgress
+                )
 
                 DebugLogger.shared.info(
                     "MeetingTranscriptionService: using native file transcription path for provider=\(provider.name)",
@@ -543,16 +569,10 @@ final class MeetingTranscriptionService: ObservableObject {
                     processingTime: processingTime,
                     fileName: fileURL.lastPathComponent,
                     sourceFilePath: fileURL.standardizedFileURL.path,
-                    speakerLabelingNotice: self.fallbackNotice
+                    speakerLabelingNotice: fallbackNotice
                 )
 
-                self.currentStatus = "Complete!"
-                self.progress = 1.0
-
-                self.result = result
-                if !options.isSourceTrack {
-                    FileTranscriptionHistoryStore.shared.addEntry(result)
-                }
+                self.publishProgress(status: "Complete!", progress: 1.0, enabled: publishesProgress)
                 return result
             }
 
@@ -593,7 +613,10 @@ final class MeetingTranscriptionService: ObservableObject {
             let sourceFramesPerChunk = AVAudioFrameCount(Double(samplesPerChunk) / resampleRatio)
             var currentFrame: AVAudioFramePosition = 0
 
-            self.currentStatus = duration > 0 ? "Transcribing audio (\(Int(duration))s)..." : "Transcribing audio..."
+            self.publishProgress(
+                status: duration > 0 ? "Transcribing audio (\(Int(duration))s)..." : "Transcribing audio...",
+                enabled: publishesProgress
+            )
 
             while currentFrame < audioFile.length {
                 let remainingFrames = AVAudioFrameCount(audioFile.length - currentFrame)
@@ -641,8 +664,11 @@ final class MeetingTranscriptionService: ObservableObject {
 
                 // Update progress
                 let progressPercent = Double(currentFrame) / Double(audioFile.length)
-                self.progress = 0.3 + (progressPercent * 0.6) // Progress from 30% to 90%
-                self.currentStatus = "Transcribing... \(Int(progressPercent * 100))%"
+                self.publishProgress(
+                    status: "Transcribing... \(Int(progressPercent * 100))%",
+                    progress: 0.3 + (progressPercent * 0.6),
+                    enabled: publishesProgress
+                )
             }
 
             if allTranscriptions.isEmpty {
@@ -658,8 +684,7 @@ final class MeetingTranscriptionService: ObservableObject {
 
             let transcriptionResult = (text: finalText, confidence: avgConfidence)
 
-            self.currentStatus = "Complete!"
-            self.progress = 1.0
+            self.publishProgress(status: "Complete!", progress: 1.0, enabled: publishesProgress)
 
             let processingTime = Date().timeIntervalSince(startTime)
 
@@ -670,22 +695,44 @@ final class MeetingTranscriptionService: ObservableObject {
                 processingTime: processingTime,
                 fileName: fileURL.lastPathComponent,
                 sourceFilePath: fileURL.standardizedFileURL.path,
-                speakerLabelingNotice: self.fallbackNotice
+                speakerLabelingNotice: fallbackNotice
             )
 
-            self.result = result
-            if !options.isSourceTrack {
-                FileTranscriptionHistoryStore.shared.addEntry(result)
-            }
             return result
 
         } catch let error as TranscriptionError {
-            self.error = error.localizedDescription
             throw error
         } catch {
             let wrappedError = TranscriptionError.transcriptionFailed(error.localizedDescription)
-            self.error = wrappedError.localizedDescription
             throw wrappedError
+        }
+    }
+
+    private func ensureModelsReady(publishesProgress: Bool) async throws {
+        guard !self.asrService.isAsrReady else { return }
+        self.publishProgress(
+            status: "Preparing ASR models...",
+            progress: 0.1,
+            enabled: publishesProgress
+        )
+        do {
+            try await self.asrService.ensureAsrReady()
+        } catch {
+            throw TranscriptionError.modelLoadFailed(error.localizedDescription)
+        }
+    }
+
+    private func publishProgress(
+        status: String? = nil,
+        progress: Double? = nil,
+        enabled: Bool
+    ) {
+        guard enabled else { return }
+        if let status {
+            self.currentStatus = status
+        }
+        if let progress {
+            self.progress = progress
         }
     }
 
@@ -725,10 +772,13 @@ final class MeetingTranscriptionService: ObservableObject {
         duration: Double,
         startTime: Date,
         expectedSpeakerCount: Int?,
-        isSourceTrack: Bool
+        publishesProgress: Bool
     ) async -> TranscriptionResult? {
-        self.currentStatus = "Identifying speakers..."
-        self.progress = 0.25
+        self.publishProgress(
+            status: "Identifying speakers...",
+            progress: 0.25,
+            enabled: publishesProgress
+        )
 
         let diarizer = SpeakerDiarizationService(expectedSpeakers: expectedSpeakerCount)
 
@@ -765,8 +815,11 @@ final class MeetingTranscriptionService: ObservableObject {
         var recognizedTurns: [SpeakerRecognizedTurn] = []
 
         for (index, turn) in turns.enumerated() {
-            self.currentStatus = "Transcribing speaker segments (\(index + 1)/\(turns.count))..."
-            self.progress = 0.3 + (Double(index) / Double(turns.count)) * 0.65
+            self.publishProgress(
+                status: "Transcribing speaker segments (\(index + 1)/\(turns.count))...",
+                progress: 0.3 + (Double(index) / Double(turns.count)) * 0.65,
+                enabled: publishesProgress
+            )
 
             let transcribed: SpeakerTurnTranscription
             do {
@@ -826,13 +879,7 @@ final class MeetingTranscriptionService: ObservableObject {
             speakerLabelingGaps: labeledTranscript.gaps
         )
 
-        self.currentStatus = "Complete!"
-        self.progress = 1.0
-
-        self.result = result
-        if !isSourceTrack {
-            FileTranscriptionHistoryStore.shared.addEntry(result)
-        }
+        self.publishProgress(status: "Complete!", progress: 1.0, enabled: publishesProgress)
         return result
     }
 
