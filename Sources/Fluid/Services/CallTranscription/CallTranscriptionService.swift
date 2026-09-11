@@ -69,10 +69,6 @@ final class CallTranscriptionService: ObservableObject {
             self.status = "Call capture unavailable"
             throw CallTranscriptionError.audioCaptureInUse
         }
-        guard self.audioCaptureCoordinator.reserve(for: .call) else {
-            self.status = "Call capture unavailable"
-            throw CallTranscriptionError.audioCaptureInUse
-        }
         CallCaptureSession.removeOrphanedRecordings()
 
         self.isTranscribing = true
@@ -85,12 +81,10 @@ final class CallTranscriptionService: ObservableObject {
             self.captureSession = session
             self.startedAt = Date()
             self.elapsedSeconds = 0
-            self.audioCaptureCoordinator.setCallRecording(true)
             self.isRecording = true
             self.status = "Recording call"
             self.startDurationUpdates()
         } catch {
-            self.audioCaptureCoordinator.release(for: .call)
             self.status = "Call capture failed"
             throw error
         }
@@ -102,13 +96,9 @@ final class CallTranscriptionService: ObservableObject {
         }
 
         self.stopDurationUpdates()
-        self.audioCaptureCoordinator.setCallRecording(false)
         self.isRecording = false
         self.isTranscribing = true
-        defer {
-            self.audioCaptureCoordinator.release(for: .call)
-            self.finishPipelineActivity()
-        }
+        defer { self.finishPipelineActivity() }
         self.captureSession = nil
         self.status = "Finalizing call audio..."
 
@@ -125,8 +115,15 @@ final class CallTranscriptionService: ObservableObject {
             self.status = "Waiting for dictation to finish..."
         }
         self.isWaitingForDictation = true
-        await self.audioCaptureCoordinator.waitUntilReleased(.dictation)
+        while !self.audioCaptureCoordinator.reserve(for: .call) {
+            await self.audioCaptureCoordinator.waitUntilReleased(.dictation)
+            guard !self.isTerminating else {
+                self.isWaitingForDictation = false
+                return
+            }
+        }
         self.isWaitingForDictation = false
+        defer { self.audioCaptureCoordinator.release(for: .call) }
         guard !self.isTerminating else { return }
 
         AnalyticsService.shared.recordUsage(
@@ -165,7 +162,6 @@ final class CallTranscriptionService: ObservableObject {
     func stopForTermination() async {
         self.isTerminating = true
         self.stopDurationUpdates()
-        self.audioCaptureCoordinator.setCallRecording(false)
 
         // ASR shutdown releases active dictation and lets the pending call task unwind.
         guard !self.isWaitingForDictation else { return }
@@ -178,10 +174,7 @@ final class CallTranscriptionService: ObservableObject {
         self.captureSession = nil
         self.isRecording = false
         self.isTranscribing = true
-        defer {
-            self.audioCaptureCoordinator.release(for: .call)
-            self.finishPipelineActivity()
-        }
+        defer { self.finishPipelineActivity() }
         if let capturedAudio = try? await session.stop() {
             capturedAudio.remove()
         }
