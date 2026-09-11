@@ -16,7 +16,12 @@ final class AudioCaptureCoordinator {
     init() {}
 
     func reserve(for requestedOwner: Owner) -> Bool {
-        guard self.owner == nil else { return false }
+        guard self.owner == nil else {
+            if requestedOwner == .dictation, self.owner == .call {
+                NotificationService.showCallTranscriptionInProgress()
+            }
+            return false
+        }
         self.owner = requestedOwner
         return true
     }
