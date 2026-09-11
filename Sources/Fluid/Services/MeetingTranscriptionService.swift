@@ -40,11 +40,6 @@ final class MeetingTranscriptionService: ObservableObject {
             self.progress = 0
         }
 
-        AnalyticsService.shared.recordUsage(
-            mode: .meeting,
-            transcriptionModel: settings.selectedSpeechModel.analyticsDescriptor
-        )
-
         do {
             let result = try await self.engine.transcribeFile(
                 fileURL,
@@ -53,6 +48,10 @@ final class MeetingTranscriptionService: ObservableObject {
                     self?.currentStatus = status
                     self?.progress = progress
                 }
+            )
+            AnalyticsService.shared.recordUsage(
+                mode: .meeting,
+                transcriptionModel: settings.selectedSpeechModel.analyticsDescriptor
             )
             self.result = result
             FileTranscriptionHistoryStore.shared.addEntry(result)

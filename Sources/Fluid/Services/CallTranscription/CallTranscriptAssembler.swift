@@ -5,6 +5,7 @@ nonisolated enum CallTranscriptAssembler {
         _ sourceResults: [(track: CapturedAudioTrack, result: TranscriptionResult)],
         capturedAudio: CapturedCallAudio,
         processingTime: TimeInterval,
+        sourceFilePath: String,
         sourceFailures: [String]
     ) -> TranscriptionResult {
         var segments: [SpeakerTranscriptSegment] = []
@@ -81,6 +82,7 @@ nonisolated enum CallTranscriptAssembler {
             duration: duration,
             processingTime: processingTime,
             fileName: capturedAudio.fileName,
+            sourceFilePath: sourceFilePath,
             kind: .call,
             speakerSegments: segments,
             speakerLabelingNotice: notices.isEmpty ? nil : notices.joined(separator: " "),

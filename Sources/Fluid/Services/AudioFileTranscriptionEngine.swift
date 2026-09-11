@@ -242,7 +242,6 @@ final class AudioFileTranscriptionEngine {
 
         do {
             try await self.asrService.ensureAsrReady()
-            progressHandler?("Models ready", 0.0)
         } catch {
             throw TranscriptionError.modelLoadFailed(error.localizedDescription)
         }

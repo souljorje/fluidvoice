@@ -3924,14 +3924,6 @@ struct ContentView: View {
             DebugLogger.shared.debug("ContentView: start ignored because capture is already active", source: "ContentView")
             return
         }
-        guard AudioCaptureCoordinator.shared.owner != .call else {
-            DebugLogger.shared.debug(
-                "ContentView: start ignored because call capture is active",
-                source: "ContentView"
-            )
-            return
-        }
-
         self.advanceOverlayLifecycle()
         self.setActiveRecordingMode(.dictate)
         let shouldShowDictationOverlay = !self.isRecordingForCommand
