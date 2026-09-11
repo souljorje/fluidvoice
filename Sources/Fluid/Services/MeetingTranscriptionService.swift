@@ -331,6 +331,7 @@ nonisolated struct TranscriptionResult: Identifiable, Sendable, Codable {
 struct FileTranscriptionOptions: Sendable, Equatable {
     let speakerLabelsEnabled: Bool
     let expectedSpeakerCount: Int?
+    let usesSerializedASR: Bool
 
     @MainActor
     static var userSettings: Self {
@@ -338,14 +339,16 @@ struct FileTranscriptionOptions: Sendable, Equatable {
         let expectedSpeakerCount = settings.fileTranscriptionExpectedSpeakerCount
         return Self(
             speakerLabelsEnabled: settings.fileTranscriptionSpeakerLabelsEnabled,
-            expectedSpeakerCount: expectedSpeakerCount > 0 ? expectedSpeakerCount : nil
+            expectedSpeakerCount: expectedSpeakerCount > 0 ? expectedSpeakerCount : nil,
+            usesSerializedASR: false
         )
     }
 
     static func callTrack(expectedSpeakerCount: Int?) -> Self {
         Self(
             speakerLabelsEnabled: true,
-            expectedSpeakerCount: expectedSpeakerCount
+            expectedSpeakerCount: expectedSpeakerCount,
+            usesSerializedASR: true
         )
     }
 }
@@ -511,7 +514,8 @@ final class MeetingTranscriptionService: ObservableObject {
                     provider: provider,
                     duration: duration,
                     startTime: startTime,
-                    expectedSpeakerCount: options.expectedSpeakerCount
+                    expectedSpeakerCount: options.expectedSpeakerCount,
+                    usesSerializedASR: options.usesSerializedASR
                 ) {
                     return labeledResult
                 }
@@ -537,7 +541,12 @@ final class MeetingTranscriptionService: ObservableObject {
                     source: "MeetingTranscriptionService"
                 )
 
-                let nativeResult = try await provider.transcribeFile(at: fileURL)
+                let nativeResult: ASRTranscriptionResult
+                if options.usesSerializedASR {
+                    nativeResult = try await self.asrService.transcribeFileForAPI(fileURL).result
+                } else {
+                    nativeResult = try await provider.transcribeFile(at: fileURL)
+                }
                 let processingTime = Date().timeIntervalSince(startTime)
                 let result = TranscriptionResult(
                     text: nativeResult.text,
@@ -627,7 +636,11 @@ final class MeetingTranscriptionService: ObservableObject {
                 }
 
                 // Transcribe this chunk using the provider (works for both Parakeet and Whisper)
-                let chunkResult = try await provider.transcribe(samples)
+                let chunkResult = try await self.transcribeSamples(
+                    samples,
+                    provider: provider,
+                    usesSerializedASR: options.usesSerializedASR
+                )
 
                 if !chunkResult.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     allTranscriptions.append(chunkResult.text)
@@ -692,6 +705,17 @@ final class MeetingTranscriptionService: ObservableObject {
         }
     }
 
+    private func transcribeSamples(
+        _ samples: [Float],
+        provider: TranscriptionProvider,
+        usesSerializedASR: Bool
+    ) async throws -> ASRTranscriptionResult {
+        if usesSerializedASR {
+            return try await self.asrService.transcribeSamplesForAPI(samples)
+        }
+        return try await provider.transcribe(samples)
+    }
+
     /// Export transcription result to text file
     nonisolated func exportToText(_ result: TranscriptionResult, to destinationURL: URL) throws {
         try result.textExport.write(to: destinationURL, atomically: true, encoding: .utf8)
@@ -727,7 +751,8 @@ final class MeetingTranscriptionService: ObservableObject {
         provider: TranscriptionProvider,
         duration: Double,
         startTime: Date,
-        expectedSpeakerCount: Int?
+        expectedSpeakerCount: Int?,
+        usesSerializedASR: Bool
     ) async -> TranscriptionResult? {
         self.currentStatus = "Identifying speakers..."
         self.progress = 0.25
@@ -772,7 +797,12 @@ final class MeetingTranscriptionService: ObservableObject {
 
             let transcribed: SpeakerTurnTranscription
             do {
-                transcribed = try await self.transcribeSpeakerTurn(turn, from: audioFile, provider: provider)
+                transcribed = try await self.transcribeSpeakerTurn(
+                    turn,
+                    from: audioFile,
+                    provider: provider,
+                    usesSerializedASR: usesSerializedASR
+                )
             } catch {
                 // A genuine audio-read or ASR failure can omit an unknown amount of speech.
                 // Use the standard full-file path rather than accepting uncertain labels.
@@ -839,7 +869,8 @@ final class MeetingTranscriptionService: ObservableObject {
     private func transcribeSpeakerTurn(
         _ turn: SpeakerDiarizationService.SpeakerTurn,
         from audioFile: AVAudioFile,
-        provider: TranscriptionProvider
+        provider: TranscriptionProvider,
+        usesSerializedASR: Bool
     ) async throws -> SpeakerTurnTranscription {
         // Bound memory for unusually long single-speaker stretches. Providers remain free to
         // apply their own model-specific, energy-aware chunking within each request.
@@ -866,7 +897,11 @@ final class MeetingTranscriptionService: ObservableObject {
             )
             guard samples.count >= 16_000 else { return nil }
 
-            let chunkResult = try await provider.transcribe(samples)
+            let chunkResult = try await self.transcribeSamples(
+                samples,
+                provider: provider,
+                usesSerializedASR: usesSerializedASR
+            )
             return SpeakerChunkTranscription(
                 text: chunkResult.text,
                 confidence: chunkResult.confidence
