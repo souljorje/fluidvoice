@@ -44,7 +44,6 @@ final class CallTranscriptionService: ObservableObject {
             self.status = "Call capture unavailable"
             throw CallTranscriptionError.audioCaptureInUse
         }
-        CallCaptureSession.removeOrphanedRecordings()
 
         self.isTranscribing = true
         defer { self.finishPipelineActivity() }
