@@ -438,11 +438,11 @@ final class MeetingTranscriptionService: ObservableObject {
         }
 
         do {
-            let result = try await self.performTranscription(fileURL, options: options)
             AnalyticsService.shared.recordUsage(
                 mode: .meeting,
                 transcriptionModel: SettingsStore.shared.selectedSpeechModel.analyticsDescriptor
             )
+            let result = try await self.transcribeSourceFile(fileURL, options: options)
             self.result = result
             self.fallbackNotice = result.speakerLabelingNotice
             FileTranscriptionHistoryStore.shared.addEntry(result)
@@ -459,13 +459,6 @@ final class MeetingTranscriptionService: ObservableObject {
 
     /// Reusable transcription without meeting analytics, history, or result state.
     func transcribeSourceFile(
-        _ fileURL: URL,
-        options: FileTranscriptionOptions
-    ) async throws -> TranscriptionResult {
-        try await self.performTranscription(fileURL, options: options)
-    }
-
-    private func performTranscription(
         _ fileURL: URL,
         options: FileTranscriptionOptions
     ) async throws -> TranscriptionResult {
