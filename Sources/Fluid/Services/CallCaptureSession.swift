@@ -1,6 +1,5 @@
 import AudioToolbox
 import CoreAudio
-import Darwin
 import Foundation
 
 enum CallTranscriptionError: LocalizedError {
@@ -34,9 +33,6 @@ enum CallTranscriptionError: LocalizedError {
 
 /// Captures system audio and the selected microphone as aligned temporary source tracks.
 final class CallCaptureSession: @unchecked Sendable {
-    private static let activeDirectoriesLock = NSLock()
-    private static var activeDirectories: Set<URL> = []
-
     private let microphoneDevice: AudioDevice.Device
     private var systemTap: CallSystemAudioTap?
     private var systemCapture: DirectCoreAudioLifecycleController?
@@ -50,39 +46,7 @@ final class CallCaptureSession: @unchecked Sendable {
         self.microphoneDevice = microphoneDevice
     }
 
-    static func removeOrphanedRecordings() {
-        let directories = (try? FileManager.default.contentsOfDirectory(
-            at: self.recordingRootURL,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        )) ?? []
-        self.activeDirectoriesLock.lock()
-        let activeDirectories = self.activeDirectories
-        self.activeDirectoriesLock.unlock()
-        for directory in directories {
-            if !activeDirectories.contains(directory) {
-                try? FileManager.default.removeItem(at: directory)
-            }
-        }
-
-        guard let processDirectories = try? FileManager.default.contentsOfDirectory(
-            at: self.baseRecordingRootURL,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        ) else { return }
-        let currentPID = ProcessInfo.processInfo.processIdentifier
-        for processDirectory in processDirectories {
-            guard let pid = Int32(processDirectory.lastPathComponent), pid != currentPID else { continue }
-            if Darwin.kill(pid, 0) != 0, errno == ESRCH {
-                try? FileManager.default.removeItem(at: processDirectory)
-            }
-        }
-    }
-
     static func removeRecordingDirectory(at directory: URL) {
-        self.activeDirectoriesLock.lock()
-        self.activeDirectories.remove(directory)
-        self.activeDirectoriesLock.unlock()
         try? FileManager.default.removeItem(at: directory)
     }
 
@@ -236,24 +200,13 @@ final class CallCaptureSession: @unchecked Sendable {
     }
 
     private static func makeRecordingDirectory(stamp: String) throws -> URL {
-        let root = self.recordingRootURL
         let suffix = String(UUID().uuidString.prefix(6))
-        let directory = root.appendingPathComponent("\(stamp)-\(suffix)", isDirectory: true)
+        let directory = self.recordingRootURL.appendingPathComponent("\(stamp)-\(suffix)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        self.activeDirectoriesLock.lock()
-        self.activeDirectories.insert(directory)
-        self.activeDirectoriesLock.unlock()
         return directory
     }
 
     private static var recordingRootURL: URL {
-        self.baseRecordingRootURL.appendingPathComponent(
-            String(ProcessInfo.processInfo.processIdentifier),
-            isDirectory: true
-        )
-    }
-
-    private static var baseRecordingRootURL: URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("FluidVoice-Calls", isDirectory: true)
     }
