@@ -363,7 +363,7 @@ struct MeetingTranscriptionView: View {
                 .buttonStyle(.borderless)
             }
 
-            if let notice = result.speakerLabelingNotice ?? transcriptionService.fallbackNotice {
+            if let notice = result.speakerLabelingNotice {
                 Label(notice, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundColor(.secondary)

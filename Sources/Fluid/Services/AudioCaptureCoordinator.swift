@@ -1,9 +1,9 @@
 import Foundation
 
-/// Serializes ASR workflows that cannot safely share stateful transcription providers.
+/// Serializes microphone-owning workflows that share audio hardware and ASR providers.
 @MainActor
 final class AudioCaptureCoordinator {
-    enum Owner: Hashable {
+    enum Owner {
         case call
         case dictation
     }
@@ -11,17 +11,11 @@ final class AudioCaptureCoordinator {
     static let shared = AudioCaptureCoordinator()
 
     private(set) var owner: Owner?
-    private var releaseWaiters: [Owner: [CheckedContinuation<Void, Never>]] = [:]
 
     init() {}
 
     func reserve(for requestedOwner: Owner) -> Bool {
-        guard self.owner == nil else {
-            if requestedOwner == .dictation, self.owner == .call {
-                NotificationService.showCallTranscriptionInProgress()
-            }
-            return false
-        }
+        guard self.owner == nil else { return false }
         self.owner = requestedOwner
         return true
     }
@@ -29,18 +23,5 @@ final class AudioCaptureCoordinator {
     func release(for releasingOwner: Owner) {
         guard self.owner == releasingOwner else { return }
         self.owner = nil
-        let waiters = self.releaseWaiters.removeValue(forKey: releasingOwner) ?? []
-        waiters.forEach { $0.resume() }
-    }
-
-    func waitUntilReleased(_ owner: Owner) async {
-        guard self.owner == owner else { return }
-        await withCheckedContinuation { continuation in
-            if self.owner == owner {
-                self.releaseWaiters[owner, default: []].append(continuation)
-            } else {
-                continuation.resume()
-            }
-        }
     }
 }

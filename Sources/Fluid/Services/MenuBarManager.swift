@@ -179,13 +179,14 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
         self.configuredCallTranscriptionIdentifier = identifier
         self.callTranscriptionService = callTranscriptionService
 
-        Publishers.CombineLatest3(
+        Publishers.CombineLatest4(
             callTranscriptionService.$isRecording,
             callTranscriptionService.$isTranscribing,
-            callTranscriptionService.$status
+            callTranscriptionService.$status,
+            callTranscriptionService.$elapsedSeconds
         )
         .receive(on: RunLoop.main)
-        .sink { [weak self] _, _, _ in
+        .sink { [weak self] _, _, _, _ in
             guard let self else { return }
             self.updateMenuBarIcon()
             self.updateMenuItemsText()
@@ -743,7 +744,7 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
         let hotkeyInfo = hotkeyDisplay.isEmpty ? "" : " (\(hotkeyDisplay))"
 
         if let call, call.isRecording {
-            self.statusMenuItem?.title = "Recording Call"
+            self.statusMenuItem?.title = "Recording Call · \(call.elapsedText)"
             self.callTranscriptionMenuItem?.title = "Stop & Transcribe Call"
             self.callTranscriptionMenuItem?.isEnabled = true
         } else if let call, call.isTranscribing {
