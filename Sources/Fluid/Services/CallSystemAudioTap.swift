@@ -6,8 +6,6 @@ import Foundation
 final class CallSystemAudioTap: @unchecked Sendable {
     let tapID: AudioObjectID
     let aggregateDeviceID: AudioObjectID
-    private let lock = NSLock()
-    private var isDestroyed = false
 
     private init(tapID: AudioObjectID, aggregateDeviceID: AudioObjectID) {
         self.tapID = tapID
@@ -15,7 +13,12 @@ final class CallSystemAudioTap: @unchecked Sendable {
     }
 
     deinit {
-        self.destroy()
+        if self.aggregateDeviceID != kAudioObjectUnknown {
+            AudioHardwareDestroyAggregateDevice(self.aggregateDeviceID)
+        }
+        if self.tapID != kAudioObjectUnknown {
+            AudioHardwareDestroyProcessTap(self.tapID)
+        }
     }
 
     static func create() async throws -> CallSystemAudioTap {
@@ -69,23 +72,6 @@ final class CallSystemAudioTap: @unchecked Sendable {
         }
 
         return CallSystemAudioTap(tapID: tapID, aggregateDeviceID: aggregateDeviceID)
-    }
-
-    func destroy() {
-        self.lock.lock()
-        guard !self.isDestroyed else {
-            self.lock.unlock()
-            return
-        }
-        self.isDestroyed = true
-        self.lock.unlock()
-
-        if self.aggregateDeviceID != kAudioObjectUnknown {
-            AudioHardwareDestroyAggregateDevice(self.aggregateDeviceID)
-        }
-        if self.tapID != kAudioObjectUnknown {
-            AudioHardwareDestroyProcessTap(self.tapID)
-        }
     }
 
     private static func waitUntilAlive(deviceID: AudioObjectID) async throws {

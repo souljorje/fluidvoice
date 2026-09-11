@@ -14,10 +14,6 @@ final class AudioCaptureCoordinator {
     private var releaseWaiters: [Owner: [CheckedContinuation<Void, Never>]] = [:]
     private(set) var isCallRecording = false
 
-    var owner: Owner? {
-        self.owners.contains(.call) ? .call : self.owners.first
-    }
-
     init() {}
 
     func reserve(for requestedOwner: Owner) -> Bool {

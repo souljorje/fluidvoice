@@ -213,8 +213,6 @@ final class CallCaptureSession: @unchecked Sendable {
             _ = await systemCapture.stop(retainPrepared: false, reason: reason)
         }
         self.systemCapture = nil
-
-        self.systemTap?.destroy()
         self.systemTap = nil
     }
 

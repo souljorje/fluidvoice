@@ -11,15 +11,12 @@ final class CallTranscriptionService: ObservableObject {
 
     @Published private(set) var isRecording = false
     @Published private(set) var isTranscribing = false
-    @Published private(set) var elapsedSeconds: TimeInterval = 0
     @Published private(set) var status = ""
 
     private let asrService: ASRService
     private let fileTranscriptionService: MeetingTranscriptionService
     private let audioCaptureCoordinator: AudioCaptureCoordinator
     private var captureSession: CallCaptureSession?
-    private var startedAt: Date?
-    private var durationTask: Task<Void, Never>?
     private var pipelineWaiters: [CheckedContinuation<Void, Never>] = []
     private var isWaitingForDictation = false
     private var isTerminating = false
@@ -31,17 +28,6 @@ final class CallTranscriptionService: ObservableObject {
         self.asrService = asrService
         self.fileTranscriptionService = MeetingTranscriptionService(asrService: asrService)
         self.audioCaptureCoordinator = audioCaptureCoordinator
-    }
-
-    var elapsedText: String {
-        let total = Int(self.elapsedSeconds.rounded(.down))
-        let hours = total / 3600
-        let minutes = (total % 3600) / 60
-        let seconds = total % 60
-        if hours > 0 {
-            return String(format: "%d:%02d:%02d", hours, minutes, seconds)
-        }
-        return String(format: "%d:%02d", minutes, seconds)
     }
 
     func start() async throws {
@@ -68,12 +54,9 @@ final class CallTranscriptionService: ObservableObject {
         do {
             try await session.start()
             self.captureSession = session
-            self.startedAt = Date()
-            self.elapsedSeconds = 0
             self.audioCaptureCoordinator.setCallRecording(true)
             self.isRecording = true
             self.status = "Recording call"
-            self.startDurationUpdates()
         } catch {
             self.audioCaptureCoordinator.release(for: .call)
             self.status = "Call capture failed"
@@ -86,7 +69,6 @@ final class CallTranscriptionService: ObservableObject {
             throw CallTranscriptionError.notRecording
         }
 
-        self.stopDurationUpdates()
         self.audioCaptureCoordinator.setCallRecording(false)
         self.isRecording = false
         self.isTranscribing = true
@@ -148,7 +130,6 @@ final class CallTranscriptionService: ObservableObject {
 
     func stopForTermination() async {
         self.isTerminating = true
-        self.stopDurationUpdates()
         self.audioCaptureCoordinator.setCallRecording(false)
 
         // ASR shutdown releases an active dictation and lets the pending call task unwind.
@@ -188,10 +169,12 @@ final class CallTranscriptionService: ObservableObject {
             let sourceName = track.source == .microphone ? "your microphone" : "other participants"
             self.status = "Transcribing \(sourceName)..."
             do {
-                let expectedSpeakerCount = track.source == .microphone ? 1 : nil
                 let result = try await self.fileTranscriptionService.transcribeSourceFile(
                     track.url,
-                    options: .callTrack(expectedSpeakerCount: expectedSpeakerCount)
+                    options: FileTranscriptionOptions(
+                        speakerLabelsEnabled: track.source == .system,
+                        expectedSpeakerCount: nil
+                    )
                 )
                 sourceResults.append((track, result))
             } catch {
@@ -301,23 +284,6 @@ final class CallTranscriptionService: ObservableObject {
             speakerLabelingNotice: notices.isEmpty ? nil : notices.joined(separator: " "),
             speakerLabelingGaps: gaps
         )
-    }
-
-    private func startDurationUpdates() {
-        self.durationTask?.cancel()
-        self.durationTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(1))
-                guard !Task.isCancelled, let self, let startedAt = self.startedAt else { continue }
-                self.elapsedSeconds = Date().timeIntervalSince(startedAt)
-            }
-        }
-    }
-
-    private func stopDurationUpdates() {
-        self.durationTask?.cancel()
-        self.durationTask = nil
-        self.startedAt = nil
     }
 
     private func waitForPipelineActivity() async {
