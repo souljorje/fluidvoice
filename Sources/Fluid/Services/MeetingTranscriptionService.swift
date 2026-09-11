@@ -341,6 +341,13 @@ struct FileTranscriptionOptions: Sendable, Equatable {
             expectedSpeakerCount: expectedSpeakerCount > 0 ? expectedSpeakerCount : nil
         )
     }
+
+    static func callTrack(expectedSpeakerCount: Int?) -> Self {
+        Self(
+            speakerLabelsEnabled: true,
+            expectedSpeakerCount: expectedSpeakerCount
+        )
+    }
 }
 
 /// Service for transcribing complete audio/video files with optional speaker diarization

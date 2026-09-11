@@ -169,12 +169,10 @@ final class CallTranscriptionService: ObservableObject {
             let sourceName = track.source == .microphone ? "your microphone" : "other participants"
             self.status = "Transcribing \(sourceName)..."
             do {
+                let expectedSpeakerCount = track.source == .microphone ? 1 : nil
                 let result = try await self.fileTranscriptionService.transcribeSourceFile(
                     track.url,
-                    options: FileTranscriptionOptions(
-                        speakerLabelsEnabled: track.source == .system,
-                        expectedSpeakerCount: nil
-                    )
+                    options: .callTrack(expectedSpeakerCount: expectedSpeakerCount)
                 )
                 sourceResults.append((track, result))
             } catch {
